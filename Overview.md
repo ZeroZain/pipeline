@@ -1,317 +1,171 @@
-# Motion Deblurring Dataset Generation Pipeline
+# Overview
 
-This document describes the complete pipeline used to generate the dataset for motion deblurring benchmarking.
-The pipeline converts MotionCam captures into structured scene folders that can be used directly by the alignment pipeline.
+The pipeline processes decoded MotionCam frames and automatically constructs dataset scenes using Laplacian sharpness analysis.
 
-The system is designed to:
+Each scene contains:
 
-* process multiple video capture pairs
-* detect sharp and blurred frames automatically
-* build dataset scenes in the required format
-* resume safely if the pipeline is stopped
-* log all processing decisions for traceability
+* a sharp reference image
+* a motion-blurred image
+* captured from both OIS and Non-OIS devices
 
----
+Scenes are generated automatically based on detected motion events within each capture.
 
-# 1. Full Project Structure
+After scene generation, the dataset undergoes a multi-stage preprocessing pipeline consisting of:
 
-The project should follow this folder layout.
+* geometric alignment
+* photometric normalization
+* color normalization
+* bicubic interpolation to a fixed resolution of **256 × 256 pixels**
 
-```
-project_root/
-│
-├── captures/
-│   ├── capture_001_ois.mcraw
-│   ├── capture_001_nonois.mcraw
-│   ├── capture_002_ois.mcraw
-│   └── capture_002_nonois.mcraw
-│
-├── decoded_frames/
-│   ├── capture_001/
-│   │   ├── ois/
-│   │   │   ├── frame_000001.png
-│   │   │   ├── frame_000002.png
-│   │   │   └── ...
-│   │   │
-│   │   └── nonois/
-│   │       ├── frame_000001.png
-│   │       ├── frame_000002.png
-│   │       └── ...
-│   │
-│   ├── capture_002/
-│   │   ├── ois/
-│   │   └── nonois/
-│   │
-│   └── ...
-│
-├── dataset/
-│   ├── scene_001/
-│   │   ├── ois_sharp.jpg
-│   │   ├── ois_blur.jpg
-│   │   ├── nonois_sharp.jpg
-│   │   └── nonois_blur.jpg
-│   │
-│   ├── scene_002/
-│   │   ├── ois_sharp.jpg
-│   │   ├── ois_blur.jpg
-│   │   ├── nonois_sharp.jpg
-│   │   └── nonois_blur.jpg
-│   │
-│   └── dataset_state.json
-│
-├── logs/
-│   ├── laplacian/
-│   │   ├── capture_001_ois.csv
-│   │   ├── capture_001_nonois.csv
-│   │   └── ...
-│   │
-│   ├── scene_selection_log.csv
-│   └── sharp_usage_log.csv
-│
-├── aligned/
-│
-└── scripts/
-    ├── laplacian_scorer.py
-    ├── scene_builder.py
-    └── run_pipeline.py
-```
+These steps ensure that all image pairs are spatially aligned, photometrically normalized, color balanced, and resolution standardized before benchmarking.
 
 ---
 
-# 2. Pipeline Stages
+# Pipeline Workflow
 
-The full dataset pipeline follows this sequence:
+The dataset is created using the following pipeline:
 
 ```
-MotionCam video
+MotionCam Capture
         ↓
-MotionCam decoder
+MotionCam Decoder
         ↓
 decoded_frames/
         ↓
-Laplacian scoring
+RAW decoding (.dng → RGB)
         ↓
-Frame selection
+Laplacian sharpness scoring
         ↓
-Scene builder
+Blur segment detection
+        ↓
+Scene generation
         ↓
 dataset/scene_x
         ↓
 Alignment pipeline
+(geometric → photometric → color)
         ↓
-aligned/
+aligned dataset
+        ↓
+Bicubic interpolation (256 × 256)
+        ↓
+final benchmark dataset
 ```
 
 ---
 
-# 3. Stage 1 — MotionCam Decoder
+# Dataset Scene Format
 
-The MotionCam decoder extracts frames from each video capture.
-
-Example output:
-
-```
-decoded_frames/capture_001/ois/frame_000001.png
-decoded_frames/capture_001/nonois/frame_000001.png
-```
-
-Frame numbering represents temporal order and must not be modified.
-
----
-
-# 4. Stage 2 — Laplacian Scoring
-
-Each frame is evaluated using the Variance of Laplacian method to measure sharpness.
-
-Example log file:
-
-```
-logs/laplacian/capture_001_ois.csv
-```
-
-Example contents:
-
-```
-frame,score
-frame_000001.png,120
-frame_000002.png,135
-frame_000003.png,410
-frame_000004.png,395
-frame_000005.png,210
-frame_000006.png,80
-frame_000007.png,60
-```
-
-This log provides the sharpness timeline for the entire video.
-
----
-
-# 5. Stage 3 — Frame Selection
-
-From the Laplacian scores the script determines:
-
-* the sharp frame (highest score during steady segment)
-* one or more blur frames (low score during shaking segments)
-
-Example detection:
-
-```
-sharp_frame = frame_000003
-blur_frames = [frame_000006, frame_000015]
-```
-
-Each blur frame corresponds to a blur moment captured during the recording.
-
----
-
-# 6. Stage 4 — Scene Builder
-
-Each blur frame generates a new dataset scene.
-
-Example output:
+Each generated scene initially contains four RAW images:
 
 ```
 dataset/
-├── scene_001/
-│   ├── ois_sharp.jpg
-│   ├── ois_blur.jpg
-│   ├── nonois_sharp.jpg
-│   └── nonois_blur.jpg
-│
-├── scene_002/
-│   ├── ois_sharp.jpg
-│   ├── ois_blur.jpg
-│   ├── nonois_sharp.jpg
-│   └── nonois_blur.jpg
+└── scene_001/
+    ├── ois_sharp.dng
+    ├── ois_blur.dng
+    ├── nonois_sharp.dng
+    └── nonois_blur.dng
 ```
 
-Scenes may reuse the same sharp frame but contain different blur frames.
+Where:
+
+| File           | Description                        |
+| -------------- | ---------------------------------- |
+| `ois_sharp`    | sharp frame from OIS capture       |
+| `ois_blur`     | blurred frame from OIS capture     |
+| `nonois_sharp` | sharp frame from non-OIS capture   |
+| `nonois_blur`  | blurred frame from non-OIS capture |
+
+Multiple scenes may reuse the same sharp frame but contain different blur frames corresponding to different motion events.
+
+After alignment and preprocessing, images are exported as standardized JPEG images.
 
 ---
 
-# 7. Stage 5 — Dataset State File
+# Key Features
 
-A dataset state file allows the pipeline to resume safely.
+The dataset generation pipeline provides:
 
-Location:
+* automatic sharp and blur frame detection
+* support for RAW `.dng` frames extracted from MotionCam
+* automatic scene generation from motion segments
+* geometric, photometric, and color alignment
+* bicubic interpolation for resolution standardization
+* reproducible dataset construction
+* full traceability through logging
+* safe restart capability if processing stops
+
+---
+
+# Logging and Traceability
+
+The pipeline records all processing decisions to ensure reproducibility.
+
+Generated logs include:
+
+```
+logs/
+├── laplacian/
+│   ├── capture_001_ois.csv
+│   └── capture_001_nonois.csv
+│
+├── scene_selection_log.csv
+├── sharp_usage_log.csv
+├── geo_log.csv
+├── photo_log.csv
+├── color_log.csv
+└── interpolation_log.csv
+```
+
+These logs record:
+
+* Laplacian sharpness scores per frame
+* which frames were selected for each scene
+* which scenes reuse the same sharp image
+* geometric alignment validation results
+* photometric normalization validation results
+* color normalization validation results
+* interpolation processing results
+
+This logging system enables full traceability and reproducibility of the dataset construction process.
+
+---
+
+# Dataset Continuation
+
+The system supports incremental dataset expansion.
+
+A state file keeps track of processed captures and the next scene ID:
 
 ```
 dataset/dataset_state.json
 ```
 
-Example:
-
-```
-{
-  "next_scene_id": 3,
-  "total_scenes": 2,
-  "processed_captures": [
-    "capture_001"
-  ]
-}
-```
-
-When the pipeline runs again it reads this file to determine the next scene number.
+This allows the pipeline to be executed multiple times without overwriting existing scenes.
 
 ---
 
-# 8. Stage 6 — Scene Selection Log
+# Alignment Pipeline
 
-The scene selection log records which frames produced each dataset scene.
+After dataset scenes are generated, they are processed by the alignment pipeline which performs:
 
-File:
+1. geometric alignment
+2. photometric normalization
+3. color normalization
 
-```
-logs/scene_selection_log.csv
-```
-
-Example:
-
-```
-scene,capture,ois_sharp,ois_blur,nonois_sharp,nonois_blur
-scene_001,capture_001,frame_000003.png,frame_000006.png,frame_000002.png,frame_000007.png
-scene_002,capture_001,frame_000003.png,frame_000015.png,frame_000002.png,frame_000017.png
-```
-
-This ensures every dataset image can be traced back to the original video frame.
+These steps ensure that paired images are spatially aligned and visually consistent.
 
 ---
 
-# 9. Stage 7 — Alignment Pipeline
+# Interpolation Stage
 
-Once dataset scenes are generated, the alignment pipeline processes them.
+Following alignment, all images are standardized to a fixed resolution using bicubic interpolation.
 
-Input:
+The interpolation stage performs:
 
-```
-dataset/
-```
+1. center cropping to obtain a square region
+2. bicubic interpolation resizing to **256 × 256 pixels**
 
-Output:
+This ensures consistent spatial dimensions across the dataset and reduces computational cost for model training.
 
-```
-aligned/
-├── gt_ois/
-│   ├── geo/
-│   ├── photo/
-│   └── color/
-```
-
-The alignment pipeline performs:
-
-1. Geometric alignment
-2. Photometric normalization
-3. Color normalization
-
----
-
-# 10. Running the Pipeline Multiple Times
-
-The system supports multiple executions without overwriting data.
-
-Example first run:
-
-```
-capture_001
-capture_002
-```
-
-Scenes created:
-
-```
-scene_001
-scene_002
-scene_003
-scene_004
-```
-
-Later additional captures are decoded:
-
-```
-capture_003
-capture_004
-```
-
-The pipeline reads the state file and continues numbering:
-
-```
-scene_005
-scene_006
-scene_007
-scene_008
-```
-
----
-
-# 11. Key Advantages of This Design
-
-This dataset pipeline provides:
-
-* support for multiple capture sessions
-* automatic scene numbering
-* full traceability through logs
-* safe restart capability
-* compatibility with the alignment pipeline
-* reproducible dataset generation
-
-This structure ensures the dataset can be expanded incrementally while maintaining consistent organization.
+The resulting dataset becomes the **final benchmark dataset** used for motion-deblurring experiments.

@@ -4,10 +4,12 @@ import json
 import csv
 import shutil
 import numpy as np
+import rawpy
 
 DECODED_ROOT = "decoded_frames"
 DATASET_ROOT = "dataset"
 LOG_ROOT = "logs"
+
 LAPLACIAN_LOG_DIR = os.path.join(LOG_ROOT, "laplacian")
 SCENE_LOG_FILE = os.path.join(LOG_ROOT, "scene_selection_log.csv")
 STATE_FILE = os.path.join(DATASET_ROOT, "dataset_state.json")
@@ -37,8 +39,30 @@ def save_state(state):
         json.dump(state, f, indent=4)
 
 
+def read_image(path):
+
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".dng":
+        try:
+            with rawpy.imread(path) as raw:
+                rgb = raw.postprocess()
+            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            return img
+        except:
+            return None
+
+    else:
+        return cv2.imread(path)
+
+
 def laplacian_score(image):
+
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # stabilize RAW noise
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
@@ -48,8 +72,11 @@ def compute_scores(folder, capture_name, mode):
     scores = []
 
     for frame in frames:
+
         path = os.path.join(folder, frame)
-        img = cv2.imread(path)
+
+        img = read_image(path)
+
         if img is None:
             continue
 
@@ -61,6 +88,7 @@ def compute_scores(folder, capture_name, mode):
     with open(log_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["frame", "score"])
+
         for frame, score in scores:
             writer.writerow([frame, score])
 
@@ -83,7 +111,9 @@ def detect_segments(scores):
         if val < threshold:
             if start is None:
                 start = i
+
         else:
+
             if start is not None:
                 if i - start >= MIN_BLUR_LENGTH:
                     blur_segments.append((start, i - 1))
@@ -112,6 +142,7 @@ def get_frame(scores, index):
 def copy_frame(src_folder, frame_name, dst_path):
 
     src = os.path.join(src_folder, frame_name)
+
     shutil.copy(src, dst_path)
 
 
@@ -148,10 +179,16 @@ def process_capture(capture_name, state):
     ois_scores = compute_scores(ois_folder, capture_name, "ois")
     nonois_scores = compute_scores(nonois_folder, capture_name, "nonois")
 
+    if len(ois_scores) == 0:
+        print("No valid frames.")
+        return
+
     sharp_index, blur_segments = detect_segments(ois_scores)
 
     ois_sharp = get_frame(ois_scores, sharp_index)
     nonois_sharp = get_frame(nonois_scores, sharp_index)
+
+    ext = os.path.splitext(ois_sharp)[1]
 
     for segment in blur_segments:
 
@@ -164,11 +201,11 @@ def process_capture(capture_name, state):
         ois_blur = pick_blur_frame(ois_scores, segment)
         nonois_blur = pick_blur_frame(nonois_scores, segment)
 
-        copy_frame(ois_folder, ois_sharp, os.path.join(scene_path, "ois_sharp.jpg"))
-        copy_frame(ois_folder, ois_blur, os.path.join(scene_path, "ois_blur.jpg"))
+        copy_frame(ois_folder, ois_sharp, os.path.join(scene_path, f"ois_sharp{ext}"))
+        copy_frame(ois_folder, ois_blur, os.path.join(scene_path, f"ois_blur{ext}"))
 
-        copy_frame(nonois_folder, nonois_sharp, os.path.join(scene_path, "nonois_sharp.jpg"))
-        copy_frame(nonois_folder, nonois_blur, os.path.join(scene_path, "nonois_blur.jpg"))
+        copy_frame(nonois_folder, nonois_sharp, os.path.join(scene_path, f"nonois_sharp{ext}"))
+        copy_frame(nonois_folder, nonois_blur, os.path.join(scene_path, f"nonois_blur{ext}"))
 
         append_scene_log([
             scene_name,

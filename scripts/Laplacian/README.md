@@ -2,7 +2,23 @@
 
 Follow these steps to generate dataset scenes from decoded MotionCam frames.
 
-### 1. Prepare decoded frames
+### 1. Install Dependencies
+
+The Laplacian dataset builder requires the following Python packages:
+
+```bash
+pip install opencv-python numpy rawpy
+```
+
+These packages are used for:
+
+* OpenCV → image processing
+* NumPy → numerical operations
+* rawpy → decoding RAW `.dng` frames
+
+---
+
+### 2. Prepare decoded frames
 
 Place extracted frames inside the `decoded_frames/` folder using the following structure:
 
@@ -10,19 +26,21 @@ Place extracted frames inside the `decoded_frames/` folder using the following s
 decoded_frames/
 ├── capture_001/
 │   ├── ois/
-│   │   ├── frame_000001.png
+│   │   ├── frame_000001.dng
 │   │   └── ...
 │   │
 │   └── nonois/
-│       ├── frame_000001.png
+│       ├── frame_000001.dng
 │       └── ...
 ```
 
 Each `capture_xxx` folder must contain both `ois` and `nonois` frames from the same recording.
 
+Frame numbering must remain in chronological order.
+
 ---
 
-### 2. Run the dataset builder
+### 3. Run the dataset builder
 
 From the **project root folder**, run:
 
@@ -32,9 +50,9 @@ python scripts/laplacian/scene_builder.py
 
 ---
 
-### 3. Dataset will be created automatically
+### 4. Dataset will be created automatically
 
-The script will generate:
+The script will generate dataset scenes:
 
 ```text
 dataset/
@@ -45,15 +63,15 @@ dataset/
 Each scene contains:
 
 ```text
-ois_sharp.jpg
-ois_blur.jpg
-nonois_sharp.jpg
-nonois_blur.jpg
+ois_sharp.dng
+ois_blur.dng
+nonois_sharp.dng
+nonois_blur.dng
 ```
 
 ---
 
-### 4. Logs are saved automatically
+### 5. Logs are saved automatically
 
 ```text
 logs/
@@ -68,7 +86,7 @@ These logs record:
 
 ---
 
-### 5. The script can be run multiple times
+### 6. The script can be run multiple times
 
 The pipeline keeps track of processed captures using:
 
@@ -76,7 +94,7 @@ The pipeline keeps track of processed captures using:
 dataset/dataset_state.json
 ```
 
-So new scenes will continue numbering automatically:
+This ensures that scene numbering continues automatically:
 
 ```text
 scene_001
@@ -85,9 +103,11 @@ scene_003
 ...
 ```
 
+Previously processed captures will not be processed again.
+
 ---
 
-### 6. Next step
+### 7. Next step
 
 After dataset generation, run the alignment pipeline:
 
@@ -95,18 +115,15 @@ After dataset generation, run the alignment pipeline:
 python scripts/alignment/alignment_pipeline.py
 ```
 
-
-
-
-
-
+---
 
 # Dataset Building Pipeline (Laplacian Frame Selection)
 
-This module builds the dataset used for the alignment and deblurring pipeline.
-It analyzes decoded video frames, computes Laplacian sharpness scores, detects blur segments, and constructs scene folders.
+This module builds the dataset used for the alignment and motion-deblurring pipeline.
 
-The output dataset will match the format required by the alignment pipeline.
+It analyzes decoded video frames, computes Laplacian sharpness scores, detects blur segments, and constructs dataset scenes automatically.
+
+The output dataset is compatible with the alignment pipeline used in the next stage.
 
 ---
 
@@ -120,6 +137,8 @@ MotionCam video
 MotionCam decoder
       ↓
 decoded_frames/
+      ↓
+RAW decoding (.dng → RGB)
       ↓
 Laplacian scoring
       ↓
@@ -142,13 +161,13 @@ project_root/
 ├── decoded_frames/
 │   ├── capture_001/
 │   │   ├── ois/
-│   │   │   ├── frame_000001.png
-│   │   │   ├── frame_000002.png
+│   │   │   ├── frame_000001.dng
+│   │   │   ├── frame_000002.dng
 │   │   │   └── ...
 │   │   │
 │   │   └── nonois/
-│   │       ├── frame_000001.png
-│   │       ├── frame_000002.png
+│   │       ├── frame_000001.dng
+│   │       ├── frame_000002.dng
 │   │       └── ...
 │   │
 │   ├── capture_002/
@@ -170,9 +189,9 @@ Important notes:
 Example:
 
 ```text
-frame_000001.png
-frame_000002.png
-frame_000003.png
+frame_000001.dng
+frame_000002.dng
+frame_000003.dng
 ```
 
 ---
@@ -184,26 +203,26 @@ After running the script, the dataset will be generated automatically:
 ```text
 dataset/
 ├── scene_001/
-│   ├── ois_sharp.jpg
-│   ├── ois_blur.jpg
-│   ├── nonois_sharp.jpg
-│   └── nonois_blur.jpg
+│   ├── ois_sharp.dng
+│   ├── ois_blur.dng
+│   ├── nonois_sharp.dng
+│   └── nonois_blur.dng
 │
 ├── scene_002/
-│   ├── ois_sharp.jpg
-│   ├── ois_blur.jpg
-│   ├── nonois_sharp.jpg
-│   └── nonois_blur.jpg
+│   ├── ois_sharp.dng
+│   ├── ois_blur.dng
+│   ├── nonois_sharp.dng
+│   └── nonois_blur.dng
 ```
 
 Each scene contains four images:
 
 | File               | Description                    |
 | ------------------ | ------------------------------ |
-| `ois_sharp.jpg`    | sharp frame from OIS video     |
-| `ois_blur.jpg`     | blur frame from OIS video      |
-| `nonois_sharp.jpg` | sharp frame from non-OIS video |
-| `nonois_blur.jpg`  | blur frame from non-OIS video  |
+| `ois_sharp.dng`    | sharp frame from OIS video     |
+| `ois_blur.dng`     | blur frame from OIS video      |
+| `nonois_sharp.dng` | sharp frame from non-OIS video |
+| `nonois_blur.dng`  | blur frame from non-OIS video  |
 
 One blur moment produces **one scene**.
 
@@ -237,10 +256,10 @@ Content:
 
 ```text
 frame,score
-frame_000001.png,120
-frame_000002.png,135
-frame_000003.png,410
-frame_000004.png,395
+frame_000001.dng,120
+frame_000002.dng,135
+frame_000003.dng,410
+frame_000004.dng,395
 ```
 
 This records the **sharpness score for every frame**.
@@ -259,8 +278,8 @@ Content:
 
 ```text
 scene,capture,ois_sharp,ois_blur,nonois_sharp,nonois_blur
-scene_001,capture_001,frame_000030.png,frame_000100.png,frame_000028.png,frame_000108.png
-scene_002,capture_001,frame_000030.png,frame_000180.png,frame_000028.png,frame_000188.png
+scene_001,capture_001,frame_000003.dng,frame_000006.dng,frame_000003.dng,frame_000006.dng
+scene_002,capture_001,frame_000003.dng,frame_000015.dng,frame_000003.dng,frame_000015.dng
 ```
 
 This allows tracing each dataset image back to its original frame.

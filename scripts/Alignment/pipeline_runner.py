@@ -1,26 +1,52 @@
 import os
 import cv2
 import csv
+import rawpy
+import shutil
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
 
 DATASET_ROOT = "dataset"
 OUTPUT_ROOT = "aligned"
-GT_SOURCE = "ois"  # "ois" or "nonois"
+GT_SOURCE = "ois"
 
 GEO_INLIER_THRESHOLD = 0.3
 FLOW_THRESHOLD = 1.5
 
 
+def read_image(path):
+
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".dng":
+        try:
+            with rawpy.imread(path) as raw:
+                rgb = raw.postprocess()
+            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            return img
+        except:
+            return None
+
+    return cv2.imread(path)
+
+
+def to_jpg(name):
+    return os.path.splitext(name)[0] + ".jpg"
+
+
 def compute_psnr(gt, img):
+
     mse = np.mean((gt.astype(np.float32) - img.astype(np.float32)) ** 2)
+
     if mse == 0:
         return 100
+
     return 20 * np.log10(255.0 / np.sqrt(mse))
 
 
 def compute_ssim(gt, img):
+
     return ssim(
         cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY),
         cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -33,12 +59,12 @@ def ensure_dir(path):
 
 def open_log(path, header):
 
-    file_exists = os.path.exists(path)
+    exists = os.path.exists(path)
 
     f = open(path, "a", newline="")
     writer = csv.writer(f)
 
-    if not file_exists:
+    if not exists:
         writer.writerow(header)
 
     return f, writer
@@ -82,14 +108,13 @@ def geo_align(ref, img):
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
     matches = bf.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
-    matches = matches[:200]
+    matches = sorted(matches, key=lambda x: x.distance)[:200]
 
     if len(matches) < 10:
         return None, 0, 999
 
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1,1,2)
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1,1,2)
 
     M, inliers = cv2.estimateAffinePartial2D(pts2, pts1, method=cv2.RANSAC)
 
@@ -113,7 +138,7 @@ def geo_align(ref, img):
         0
     )
 
-    magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+    magnitude = np.sqrt(flow[...,0]**2 + flow[...,1]**2)
     mean_flow = float(np.mean(magnitude))
 
     return aligned, inlier_ratio, mean_flow
@@ -128,18 +153,18 @@ def photometric_align(ref, img):
 
     for c in range(3):
 
-        ref_mean = np.mean(ref[:, :, c])
-        img_mean = np.mean(img[:, :, c])
+        ref_mean = np.mean(ref[:,:,c])
+        img_mean = np.mean(img[:,:,c])
 
-        ref_std = np.std(ref[:, :, c])
-        img_std = np.std(img[:, :, c])
+        ref_std = np.std(ref[:,:,c])
+        img_std = np.std(img[:,:,c])
 
         scale = ref_std / img_std if img_std > 1e-6 else 1.0
         shift = ref_mean - scale * img_mean
 
-        corrected[:, :, c] = scale * img[:, :, c] + shift
+        corrected[:,:,c] = scale * img[:,:,c] + shift
 
-    corrected = np.clip(corrected, 0, 255).astype(np.uint8)
+    corrected = np.clip(corrected,0,255).astype(np.uint8)
 
     return corrected
 
@@ -153,8 +178,8 @@ def color_align(ref, img):
 
     for c in range(3):
 
-        ref_mean, ref_std = cv2.meanStdDev(ref_lab[:, :, c])
-        img_mean, img_std = cv2.meanStdDev(img_lab[:, :, c])
+        ref_mean, ref_std = cv2.meanStdDev(ref_lab[:,:,c])
+        img_mean, img_std = cv2.meanStdDev(img_lab[:,:,c])
 
         ref_mean = ref_mean[0][0]
         ref_std = ref_std[0][0]
@@ -163,114 +188,142 @@ def color_align(ref, img):
 
         scale = ref_std / img_std if img_std > 1e-6 else 1.0
 
-        corrected[:, :, c] = (img_lab[:, :, c] - img_mean) * scale + ref_mean
+        corrected[:,:,c] = (img_lab[:,:,c] - img_mean) * scale + ref_mean
 
-    corrected = np.clip(corrected, 0, 255).astype(np.uint8)
+    corrected = np.clip(corrected,0,255).astype(np.uint8)
 
     return cv2.cvtColor(corrected, cv2.COLOR_LAB2BGR)
 
 
-def deltaE(ref, img):
+def deltaE(ref,img):
 
     ref_lab = cv2.cvtColor(ref, cv2.COLOR_BGR2LAB)
     img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
 
-    return float(np.mean(np.sqrt(np.sum((ref_lab - img_lab)**2, axis=2))))
+    return float(np.mean(np.sqrt(np.sum((ref_lab-img_lab)**2,axis=2))))
+
+
+def cleanup_intermediate():
+
+    geo_path = os.path.join(OUTPUT_ROOT,f"gt_{GT_SOURCE}","geo")
+    photo_path = os.path.join(OUTPUT_ROOT,f"gt_{GT_SOURCE}","photo")
+
+    if os.path.exists(geo_path):
+        shutil.rmtree(geo_path)
+
+    if os.path.exists(photo_path):
+        shutil.rmtree(photo_path)
+
+    print("Intermediate folders removed")
 
 
 def run_pipeline():
 
-    geo_log, photo_log, color_log, geo_writer, photo_writer, color_writer = init_logs()
+    geo_log,photo_log,color_log,geo_writer,photo_writer,color_writer = init_logs()
 
     for scene in sorted(os.listdir(DATASET_ROOT)):
 
-        scene_path = os.path.join(DATASET_ROOT, scene)
+        scene_path = os.path.join(DATASET_ROOT,scene)
 
         if not os.path.isdir(scene_path):
             continue
 
-        gt_path = os.path.join(
-            scene_path,
-            "ois_sharp.jpg" if GT_SOURCE == "ois" else "nonois_sharp.jpg"
-        )
+        gt_file = "ois_sharp" if GT_SOURCE=="ois" else "nonois_sharp"
 
-        gt = cv2.imread(gt_path)
+        gt_path = None
+
+        for f in os.listdir(scene_path):
+            if f.startswith(gt_file):
+                gt_path = os.path.join(scene_path,f)
+                break
+
+        if gt_path is None:
+            continue
+
+        gt = read_image(gt_path)
 
         if gt is None:
             continue
 
-        geo_out = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "geo", scene)
-        photo_out = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "photo", scene)
-        color_out = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "color", scene)
+        geo_out = os.path.join(OUTPUT_ROOT,f"gt_{GT_SOURCE}","geo",scene)
+        photo_out = os.path.join(OUTPUT_ROOT,f"gt_{GT_SOURCE}","photo",scene)
+        color_out = os.path.join(OUTPUT_ROOT,f"gt_{GT_SOURCE}","color",scene)
 
         ensure_dir(geo_out)
         ensure_dir(photo_out)
         ensure_dir(color_out)
 
+        gt_name = to_jpg(os.path.basename(gt_path))
+
+        cv2.imwrite(os.path.join(geo_out,gt_name),gt,[cv2.IMWRITE_JPEG_QUALITY,95])
+        cv2.imwrite(os.path.join(photo_out,gt_name),gt,[cv2.IMWRITE_JPEG_QUALITY,95])
+        cv2.imwrite(os.path.join(color_out,gt_name),gt,[cv2.IMWRITE_JPEG_QUALITY,95])
+
         for file in sorted(os.listdir(scene_path)):
 
-            if file == os.path.basename(gt_path):
+            if file.startswith(gt_file):
                 continue
 
-            img_path = os.path.join(scene_path, file)
-            img = cv2.imread(img_path)
+            img = read_image(os.path.join(scene_path,file))
 
             if img is None:
                 continue
 
-            geo_img, inlier_ratio, mean_flow = geo_align(gt, img)
+            geo_img,inlier_ratio,mean_flow = geo_align(gt,img)
 
             geo_valid = (
-                geo_img is not None
-                and inlier_ratio >= GEO_INLIER_THRESHOLD
-                and mean_flow <= FLOW_THRESHOLD
+                geo_img is not None and
+                inlier_ratio>=GEO_INLIER_THRESHOLD and
+                mean_flow<=FLOW_THRESHOLD
             )
 
-            geo_writer.writerow([scene, file, inlier_ratio, mean_flow, geo_valid])
+            geo_writer.writerow([scene,file,inlier_ratio,mean_flow,geo_valid])
 
             if not geo_valid:
                 continue
 
-            cv2.imwrite(os.path.join(geo_out, file), geo_img)
+            name = to_jpg(file)
 
-            mean_before = abs(np.mean(gt) - np.mean(geo_img))
+            cv2.imwrite(os.path.join(geo_out,name),geo_img,[cv2.IMWRITE_JPEG_QUALITY,95])
 
-            photo_img = photometric_align(gt, geo_img)
+            mean_before = abs(np.mean(gt)-np.mean(geo_img))
 
-            mean_after = abs(np.mean(gt) - np.mean(photo_img))
+            photo_img = photometric_align(gt,geo_img)
+
+            mean_after = abs(np.mean(gt)-np.mean(photo_img))
 
             photo_valid = mean_after < mean_before
 
-            photo_writer.writerow([scene, file, mean_before, mean_after, photo_valid])
+            photo_writer.writerow([scene,file,mean_before,mean_after,photo_valid])
 
             if not photo_valid:
                 continue
 
-            cv2.imwrite(os.path.join(photo_out, file), photo_img)
+            cv2.imwrite(os.path.join(photo_out,name),photo_img,[cv2.IMWRITE_JPEG_QUALITY,95])
 
-            delta_before = deltaE(gt, photo_img)
+            delta_before = deltaE(gt,photo_img)
 
-            color_img = color_align(gt, photo_img)
+            color_img = color_align(gt,photo_img)
 
-            delta_after = deltaE(gt, color_img)
+            delta_after = deltaE(gt,color_img)
 
-            psnr_val = compute_psnr(gt, color_img)
-            ssim_val = compute_ssim(gt, color_img)
+            psnr_val = compute_psnr(gt,color_img)
+            ssim_val = compute_ssim(gt,color_img)
 
             color_valid = delta_after < delta_before
 
-            color_writer.writerow(
-                [scene, file, delta_before, delta_after, psnr_val, ssim_val, color_valid]
-            )
+            color_writer.writerow([scene,file,delta_before,delta_after,psnr_val,ssim_val,color_valid])
 
             if not color_valid:
                 continue
 
-            cv2.imwrite(os.path.join(color_out, file), color_img)
+            cv2.imwrite(os.path.join(color_out,name),color_img,[cv2.IMWRITE_JPEG_QUALITY,95])
 
     geo_log.close()
     photo_log.close()
     color_log.close()
+
+    cleanup_intermediate()
 
 
 if __name__ == "__main__":

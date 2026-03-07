@@ -4,6 +4,7 @@ import json
 import csv
 import shutil
 import numpy as np
+import rawpy
 
 DECODED_ROOT = "decoded_frames"
 DATASET_ROOT = "dataset"
@@ -40,8 +41,26 @@ def save_state(state):
         json.dump(state, f, indent=4)
 
 
+def read_image(path):
+
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".dng":
+        try:
+            with rawpy.imread(path) as raw:
+                rgb = raw.postprocess()
+            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            return img
+        except:
+            return None
+
+    else:
+        return cv2.imread(path)
+
+
 def laplacian_score(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
@@ -51,8 +70,9 @@ def score_frames(folder, capture_name, cam_type):
     scores = []
 
     for f in files:
+
         path = os.path.join(folder, f)
-        img = cv2.imread(path)
+        img = read_image(path)
 
         if img is None:
             continue
@@ -129,19 +149,21 @@ def build_scene(scene_id,
 
     os.makedirs(scene_path, exist_ok=True)
 
+    ext = os.path.splitext(sharp_frame)[1]
+
     ois_sharp_src = os.path.join(ois_dir, sharp_frame)
     ois_blur_src = os.path.join(ois_dir, blur_frame)
 
     nonois_sharp_src = os.path.join(nonois_dir, sharp_frame)
     nonois_blur_src = os.path.join(nonois_dir, blur_frame)
 
-    shutil.copy(ois_sharp_src, os.path.join(scene_path, "ois_sharp.jpg"))
-    shutil.copy(ois_blur_src, os.path.join(scene_path, "ois_blur.jpg"))
+    shutil.copy(ois_sharp_src, os.path.join(scene_path, f"ois_sharp{ext}"))
+    shutil.copy(ois_blur_src, os.path.join(scene_path, f"ois_blur{ext}"))
 
     shutil.copy(nonois_sharp_src,
-                os.path.join(scene_path, "nonois_sharp.jpg"))
+                os.path.join(scene_path, f"nonois_sharp{ext}"))
     shutil.copy(nonois_blur_src,
-                os.path.join(scene_path, "nonois_blur.jpg"))
+                os.path.join(scene_path, f"nonois_blur{ext}"))
 
     append_csv(
         SCENE_LOG,
@@ -167,6 +189,10 @@ def process_capture(capture_name, state):
 
     ois_scores = score_frames(ois_dir, capture_name, "ois")
     nonois_scores = score_frames(nonois_dir, capture_name, "nonois")
+
+    if len(ois_scores) == 0:
+        print("No valid frames detected.")
+        return
 
     sharp_idx, blur_segments = detect_segments(ois_scores)
 
