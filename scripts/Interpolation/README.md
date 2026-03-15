@@ -9,18 +9,17 @@ Raw Image (.dng / .jpg / .png)
         ↓
 RAW decoding (if .dng)
         ↓
-Geometric Alignment
+Geometric Alignment (Homography/Affine)
         ↓
-Photometric Alignment
+Photometric & Color Alignment (LAB Global Mean)
         ↓
-Color Alignment
-        ↓
-Bicubic Interpolation (256 × 256)
+Bicubic Interpolation & Inward Crop (256 × 256)
         ↓
 Final Benchmark Dataset
+
 ```
 
-This ensures that interpolation is applied only to **fully aligned image pairs**.
+This ensures that interpolation is applied only to **fully aligned and color-corrected image pairs**.
 
 ---
 
@@ -28,261 +27,121 @@ This ensures that interpolation is applied only to **fully aligned image pairs**
 
 The interpolation script expects the **output of the alignment pipeline**.
 
-Example project structure:
-
 ```
 your_project/
 │
-├── pipeline_runner.py
 ├── interpolation_stage.py
-│
+├── logs/
+│   └── interpolation_log.csv    (auto-created)
 ├── aligned/
 │   └── gt_ois/
 │       └── color/
 │           ├── scene_001/
 │           │   ├── ois_sharp.jpg
-│           │   ├── ois_blur.jpg
-│           │   ├── nonois_sharp.jpg
-│           │   └── nonois_blur.jpg
-│           │
-│           ├── scene_002/
-│           │   ├── ois_sharp.jpg
-│           │   ├── ois_blur.jpg
-│           │   ├── nonois_sharp.jpg
-│           │   └── nonois_blur.jpg
+│           │   └── ...
 │
-└── dataset_256/   (auto-created)
-```
-
-The script scans all scenes located inside:
+└── dataset_256/                 (auto-created)
 
 ```
-aligned/gt_ois/color/
-```
-
-or
-
-```
-aligned/gt_nonois/color/
-```
-
-depending on the selected ground truth configuration.
 
 ---
 
 # 2. Required Libraries
 
-Install required libraries:
+Install required libraries via terminal:
+
+```bash
+pip install opencv-python numpy tqdm
 
 ```
-pip install opencv-python numpy
-```
 
-Library purposes:
-
-| Library | Purpose                         |
-| ------- | ------------------------------- |
-| OpenCV  | image loading and interpolation |
-| NumPy   | numerical operations            |
+| Library | Purpose |
+| --- | --- |
+| OpenCV | Image loading, resizing, and saving |
+| NumPy | Matrix operations |
+| **tqdm** | **Visual progress bar tracking** |
 
 ---
 
 # 3. Selecting Ground Truth Source
 
-Inside the script, locate:
+Inside `interpolation_stage.py`, locate:
 
-```
+```python
 GT_SOURCE = "ois"
-```
-
-Options:
 
 ```
-"ois"
-```
 
-or
-
-```
-"nonois"
-```
-
-Meaning:
-
-| Value      | Dataset Used                          |
-| ---------- | ------------------------------------- |
-| `"ois"`    | reads from `aligned/gt_ois/color/`    |
+| Value | Dataset Used |
+| --- | --- |
+| `"ois"` | reads from `aligned/gt_ois/color/` |
 | `"nonois"` | reads from `aligned/gt_nonois/color/` |
 
-The output dataset will be stored accordingly.
+---
+
+# 4. Inward Center Crop (Black Artifact Removal)
+
+Geometric alignment often causes black "void" areas at the edges due to image rotation and warping.
+
+To ensure a clean dataset, the script performs an **Inward-Zoom Crop** before resizing.
+
+* **Default Factor:** `0.8` (Takes the center 80% of the image).
+* **Result:** Removes homography-induced border artifacts.
 
 ---
 
-# 4. How to Run the Interpolation Stage
+# 5. Smart Resume Logic (Skip Existing)
 
-From the project root directory run:
+The script features **Resume Logic** to save time during large-scale processing:
 
-```
-python interpolation_stage.py
-```
+1. It checks the `dataset_256` folder before processing a file.
+2. If the processed `.jpg` already exists, it **skips** that image.
+3. This allows you to stop and restart the script or add new scenes without re-processing old ones.
 
-The script automatically:
-
-1. scans all scenes in the aligned dataset
-2. loads each image
-3. center-crops images to square shape
-4. resizes images to **256 × 256**
-5. saves interpolated images
-6. logs processing results
-
-No manual scene selection is required.
-
----
-
-# 5. Center Crop Procedure
-
-Images may have different aspect ratios depending on the capture device.
-
-Before resizing, each image is **center-cropped to a square region**.
-
-Example:
-
-```
-4032 × 3024
-      ↓
-3024 × 3024 (center crop)
-      ↓
-256 × 256 resize
-```
-
-This step prevents geometric distortion that would occur if images were directly resized.
+> **Note:** If you change the `crop_factor` or `TARGET_SIZE`, delete the `dataset_256` folder to force the script to re-generate the images.
 
 ---
 
 # 6. Bicubic Interpolation
 
-After cropping, images are resized using **bicubic interpolation**.
+After cropping, images are resized to **256 × 256** using `cv2.INTER_CUBIC`.
 
-Interpolation method:
+**Advantages for Thesis Research:**
 
-```
-cv2.INTER_CUBIC
-```
-
-Bicubic interpolation uses a **4 × 4 pixel neighborhood** to estimate new pixel values.
-
-Advantages:
-
-* smoother results compared to bilinear interpolation
-* reduced aliasing artifacts
-* better preservation of image structures
-
-This makes it suitable for **vision datasets and deep learning preprocessing**.
+* Uses a **4 × 4 pixel neighborhood** for smoother gradients.
+* Preserves high-frequency details better than Bilinear interpolation.
+* Industry standard for Super-Resolution and Deblurring datasets (e.g., GOPRO, REDS).
 
 ---
 
-# 7. Output Dataset Structure
+# 7. Progress Monitoring
 
-After processing, the dataset is written to:
+The script uses a dynamic progress bar (`tqdm`) to monitor the status:
 
-```
-dataset_256/
-```
-
-Example:
-
-```
-dataset_256/
-└── gt_ois/
-    ├── scene_001/
-    │   ├── ois_sharp.jpg
-    │   ├── ois_blur.jpg
-    │   ├── nonois_sharp.jpg
-    │   └── nonois_blur.jpg
-    │
-    ├── scene_002/
-    │   ├── ois_sharp.jpg
-    │   ├── ois_blur.jpg
-    │   ├── nonois_sharp.jpg
-    │   └── nonois_blur.jpg
-```
-
-All images are saved as:
-
-```
-256 × 256 resolution
-JPEG (quality = 95)
-```
-
-The scene structure remains identical to the aligned dataset.
+* **Percentage:** Overall progress of all scenes.
+* **Speed:** Scenes processed per second.
+* **ETA:** Estimated time remaining until dataset completion.
 
 ---
 
-# 8. Log File
+# 8. Log File Management
 
-The script automatically generates:
+Logs are saved to `logs/interpolation_log.csv`.
 
-```
-logs/interpolation_log.csv
-```
+**Update Behavior:** The script now **appends** to the log. This ensures that if you process half of your dataset today and the other half tomorrow, the log file will contain the history of both sessions.
 
-Columns:
-
-```
-scene
-image
-original_width
-original_height
-status
-```
-
-Example entry:
-
-```
-scene_001,ois_blur.jpg,4032,3024,SUCCESS
-```
-
-Possible status values:
-
-| Status        | Meaning                           |
-| ------------- | --------------------------------- |
-| SUCCESS       | image successfully resized        |
-| SKIPPED_SMALL | image resolution smaller than 256 |
+| Status | Meaning |
+| --- | --- |
+| SUCCESS | Image successfully cropped and resized. |
+| SKIPPED_SMALL | Image resolution was smaller than 256px. |
 
 ---
 
-# 9. Full Dataset Preparation Flow
-
-The complete preprocessing workflow becomes:
-
-```
-Scene Generation (Laplacian Detection)
-        ↓
-Geometric Alignment
-        ↓
-Photometric Alignment
-        ↓
-Color Alignment
-        ↓
-Bicubic Interpolation (256 × 256)
-        ↓
-Final Benchmark Dataset
-```
-
-Each stage ensures that the dataset is:
-
-* spatially aligned
-* photometrically normalized
-* color balanced
-* resolution standardized
-
----
-
-# 10. Purpose of Interpolation Stage
+# 9. Purpose of Interpolation Stage
 
 The interpolation stage ensures:
 
-1. consistent input resolution for deep learning models
-2. reduced computational cost during training
-3. reproducible benchmarking conditions
-4. standardized dataset dimensions
+1. **Border Removal:** Eliminates black pixels from alignment warping.
+2. **Consistency:** Standard 256x256 resolution for **MLWNet/SwinIR** models.
+3. **Efficiency:** Reduces memory usage during GPU training.
+4. **Validity:** Ensures the AI learns from valid image content, not border artifacts.

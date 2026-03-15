@@ -1,0 +1,13 @@
+# Ignore the virtual environment
+venv/
+
+# Ignore local datasets and logs (they are usually too large for GitHub)
+dataset/
+dataset_256/
+aligned/
+decoded_frames/
+logs/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
