@@ -138,8 +138,10 @@ Only one can be active per run.
 
 From the project root directory:
 
-```
-python pipeline_runner.py
+```bash
+
+python scripts/Alignment/pipeline_runner.py
+
 ```
 
 The script automatically:
