@@ -2,9 +2,9 @@
 
 ## 1. Overview
 
-The Watcher Pipeline is responsible for automatically detecting and processing `capture_xxx` folders from Google Drive.
+The Watcher Pipeline automatically detects and processes `capture_xxx` folders from Google Drive.
 
-It serves as the entry point and processing engine of the system, handling the full workflow from detection to final output.
+It serves as the entry point and processing engine of the system, handling the full workflow from detection to final dataset generation. The pipeline is designed to be robust against incomplete uploads and flexible in handling different input folder structures.
 
 ---
 
@@ -16,13 +16,60 @@ The pipeline performs the following steps:
 2. Detects new and existing `capture_xxx` folders
 3. Waits until the upload is fully complete
 4. Copies data into a local staging directory
-5. Extracts ZIP files from `ois` and `nonois` folders
-6. Removes all non-`.dng` files (e.g., `.zip`, `.wav`, `.ini`)
-7. Moves the processed data into the final output directory
+5. Recursively locates ZIP files inside `ois` and `nonois` folders
+6. Extracts ZIP files and flattens nested structures
+7. Removes all non-`.dng` files (e.g., `.zip`, `.wav`, `.ini`)
+8. Moves the processed data into the final output directory
 
 ---
 
-## 3. Pipeline Flow
+## 3. Supported Input Structures
+
+The pipeline supports both flat and nested structures.
+
+### 3.1 Standard Structure
+
+```text
+capture_xxx/
+   ├── ois/
+   │     file.zip
+   └── nonois/
+         file.zip
+```
+
+---
+
+### 3.2 Nested Structure (Supported)
+
+```text
+capture_xxx/
+   ├── ois/
+   │     some_folder/
+   │         file.zip
+   └── nonois/
+         another_folder/
+             file.zip
+```
+
+---
+
+### 3.3 Mixed Structure
+
+```text
+capture_xxx/
+   ├── ois/
+   │     file.zip
+   │     folder/
+   │         file.zip
+   └── nonois/
+         file.zip
+```
+
+All ZIP files are automatically detected regardless of depth and processed into a consistent output format.
+
+---
+
+## 4. Pipeline Flow
 
 ```text
 Google Drive (upload capture_xxx)
@@ -35,30 +82,34 @@ Upload Validation (wait until complete)
         ↓
 Copy → Staging (local)
         ↓
-Extract and Clean Files
+Recursive ZIP Detection
+        ↓
+Extract and Flatten
+        ↓
+Clean Non-DNG Files
         ↓
 Move → decoded_frames
 ```
 
 ---
 
-## 4. Directory Structure
+## 5. Directory Structure
 
-### 4.1 Watch Folder (Google Drive)
+### 5.1 Watch Folder (Google Drive)
 
 ```text
 G:\My Drive\Thesis or Crisis\Videos\automationInput
 ```
 
-This folder must:
+Requirements:
 
-* Exist locally
-* Be synced using Google Drive for Desktop
-* Contain real folders (not shortcuts)
+* Must exist locally
+* Must be synced using Google Drive for Desktop
+* Must contain real folders (not shortcuts)
 
 ---
 
-### 4.2 Staging Folder (Temporary Processing)
+### 5.2 Staging Folder (Temporary Processing)
 
 ```text
 C:\Users\Windows 11\Documents\GitHub\pipeline\staging
@@ -67,15 +118,15 @@ C:\Users\Windows 11\Documents\GitHub\pipeline\staging
 Used for:
 
 * Safe local processing
-* Temporary storage during extraction
+* Temporary extraction and transformation
 
 Note:
 
-* This folder will appear empty after processing because files are moved to the output directory
+* This folder may appear empty after processing because files are moved to the output directory
 
 ---
 
-### 4.3 Output Folder
+### 5.3 Output Folder
 
 ```text
 C:\Users\Windows 11\Documents\GitHub\pipeline\decoded_frames
@@ -85,9 +136,9 @@ Contains the final processed dataset with only `.dng` files.
 
 ---
 
-## 5. Setup and Execution
+## 6. Setup and Execution
 
-### 5.1 Open Terminal
+### 6.1 Open Terminal
 
 ```bash
 cd pipeline
@@ -95,7 +146,7 @@ cd pipeline
 
 ---
 
-### 5.2 Activate Virtual Environment
+### 6.2 Activate Virtual Environment
 
 ```bash
 .\.venv\Scripts\activate
@@ -103,7 +154,7 @@ cd pipeline
 
 ---
 
-### 5.3 Run the Watcher
+### 6.3 Run the Watcher
 
 ```bash
 python scripts/Watcher/watcher.py
@@ -111,9 +162,9 @@ python scripts/Watcher/watcher.py
 
 ---
 
-## 6. Expected Behavior
+## 7. Expected Behavior
 
-### 6.1 On Startup
+### 7.1 On Startup
 
 ```text
 [INIT] Checking existing folders...
@@ -122,7 +173,7 @@ Watching for new capture folders...
 
 ---
 
-### 6.2 During Processing
+### 7.2 During Processing
 
 ```text
 [FOUND EXISTING] capture_001
@@ -139,15 +190,16 @@ Watching for new capture folders...
 
 ---
 
-## 7. Testing Procedure
+## 8. Testing Procedure
 
 1. Run the watcher script
-2. Upload a new folder to Google Drive:
+2. Upload a folder to Google Drive:
 
 ```text
 capture_003/
    ├── ois/
-   │     file.zip
+   │     folder/
+   │         file.zip
    └── nonois/
          file.zip
 ```
@@ -156,7 +208,7 @@ capture_003/
 
 ---
 
-## 8. Expected Output
+## 9. Expected Output
 
 ```text
 decoded_frames/
@@ -167,23 +219,24 @@ decoded_frames/
             *.dng
 ```
 
-Only `.dng` files should remain in both subfolders.
+All nested structures are flattened, and only `.dng` files remain.
 
 ---
 
-## 9. Important Behavior
+## 10. Important Behavior
 
 * Processing is sequential (one capture at a time)
 * Both existing and newly added folders are supported
 * Upload completion is validated before processing
+* Nested ZIP structures are automatically handled
 * Staging ensures safe and consistent processing
 * Non-essential files are automatically removed
 
 ---
 
-## 10. Common Issues
+## 11. Common Issues
 
-### 10.1 Incomplete Output
+### 11.1 Incomplete Output
 
 Cause:
 
@@ -191,12 +244,12 @@ Cause:
 
 Solution:
 
-* Ensure upload completes fully before processing begins
-* The system now includes automatic waiting logic
+* The system includes upload validation logic
+* Ensure stable internet connection during upload
 
 ---
 
-### 10.2 Google Drive Issues
+### 11.2 Google Drive Issues
 
 * Files must be fully synced locally
 * Avoid using shortcuts
@@ -204,9 +257,9 @@ Solution:
 
 ---
 
-### 10.3 Module Not Found
+### 11.3 Module Not Found
 
-Install required dependency:
+Install dependency:
 
 ```bash
 pip install watchdog
@@ -214,9 +267,9 @@ pip install watchdog
 
 ---
 
-## 11. Design Rationale
+## 12. Design Rationale
 
-### 11.1 Use of Staging
+### 12.1 Use of Staging
 
 ```text
 Drive → Staging → Processing → Output
@@ -230,32 +283,40 @@ Advantages:
 
 ---
 
-## 12. Notes for Team
+### 12.2 Flexible Input Handling
+
+The system uses recursive file discovery to handle inconsistent folder structures. This ensures compatibility with real-world data where file organization may vary.
+
+---
+
+## 13. Notes for Team
 
 * Always run the watcher before uploading new data
 * Do not upload shortcut folders
 * Do not manually modify the staging directory
-* All outputs are automatically generated in `decoded_frames`
+* Output will automatically appear in `decoded_frames`
 
 ---
 
-## 13. Future Improvements
+## 14. Future Improvements
 
 * Logging system
 * Performance optimization
 * Parallel processing
 * Data validation (frame count, completeness)
+* Corrupted ZIP detection
 
 ---
 
-## 14. Summary
+## 15. Summary
 
-This module is a complete automated pipeline that handles:
+This module implements a complete automated data processing pipeline that handles:
 
 * Detection
 * Upload validation
+* Flexible input ingestion
 * Staging
-* Extraction
+* Extraction and normalization
 * Cleanup
 * Output generation
 
