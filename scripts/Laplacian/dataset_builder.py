@@ -197,13 +197,27 @@ def process_capture(capture_name, state):
         )
 
         sharp_f_nonois = best_nonois_sharp_entry[0]
+        nonois_sharp_score = best_nonois_sharp_entry[1]
+        nonois_blur_threshold = nonois_sharp_score * BLUR_THRESHOLD_RATIO
 
         # Find blur match in non-OIS
         b_start = max(0, blur_idx_ois - SEARCH_WINDOW)
         b_end = min(len(nonois_results), blur_idx_ois + SEARCH_WINDOW + 1)
 
+        nonois_blur_candidates = [
+            entry for entry in nonois_results[b_start:b_end]
+            if entry[1] <= nonois_blur_threshold
+        ]
+
+        if not nonois_blur_candidates:
+            print(
+                f"Skipped segment in {capture_name}: "
+                f"no non-OIS blur <= 50% of non-OIS sharp near frame {blur_idx_ois}."
+            )
+            continue
+
         worst_nonois_blur_entry = min(
-            nonois_results[b_start:b_end],
+            nonois_blur_candidates,
             key=lambda x: x[1]
         )
 
