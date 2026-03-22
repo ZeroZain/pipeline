@@ -7,16 +7,21 @@ import numpy as np
 from tqdm import tqdm
 from skimage.metrics import structural_similarity as ssim
 
-# Configuration
-DATASET_ROOT = "dataset"
-OUTPUT_ROOT = "aligned"
+# ================= PATH FIX =================
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+DATASET_ROOT = os.path.join(BASE_DIR, "dataset")
+OUTPUT_ROOT = os.path.join(BASE_DIR, "aligned")
+LOG_ROOT = os.path.join(BASE_DIR, "logs")
+
 GT_SOURCE = "ois"
 
 GEO_INLIER_THRESHOLD = 0.1
 FLOW_THRESHOLD = 15.0
 
 
-# Image Reading
+# ================= IMAGE =================
+
 def read_image(path):
     ext = os.path.splitext(path)[1].lower()
 
@@ -27,9 +32,9 @@ def read_image(path):
                     use_camera_wb=True,
                     no_auto_bright=False
                 )
-            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            return img
-        except:
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            print(f"Failed to read RAW: {path}")
             return None
 
     return cv2.imread(path)
@@ -39,7 +44,8 @@ def to_jpg(name):
     return os.path.splitext(name)[0] + ".jpg"
 
 
-# Image Quality Metrics
+# ================= METRICS =================
+
 def compute_psnr(gt, img):
     mse = np.mean((gt.astype(np.float32) - img.astype(np.float32)) ** 2)
     if mse == 0:
@@ -54,7 +60,8 @@ def compute_ssim(gt, img):
     )
 
 
-# Directory Utilities
+# ================= UTILS =================
+
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
@@ -70,21 +77,20 @@ def open_log(path, header):
 
 def init_logs():
 
-    ensure_dir("logs")
+    ensure_dir(LOG_ROOT)
 
     geo_log, geo_writer = open_log(
-        "logs/geo_log.csv",
+        os.path.join(LOG_ROOT, "geo_log.csv"),
         ["scene", "image", "inlier_ratio", "mean_flow", "valid", "fallback"]
     )
 
     photo_log, photo_writer = open_log(
-        "logs/photo_log.csv",
+        os.path.join(LOG_ROOT, "photo_log.csv"),
         ["scene", "image", "mean_before", "mean_after", "valid"]
     )
 
-    # ✅ FIXED HEADER
     color_log, color_writer = open_log(
-        "logs/color_log.csv",
+        os.path.join(LOG_ROOT, "color_log.csv"),
         ["scene", "image",
          "deltaE_before", "deltaE_after",
          "psnr_raw", "psnr_photo", "psnr_final",
@@ -92,23 +98,18 @@ def init_logs():
     )
 
     scene_fail_log, scene_fail_writer = open_log(
-        "logs/scene_fail_log.csv",
+        os.path.join(LOG_ROOT, "scene_fail_log.csv"),
         ["scene", "failed_images", "failed_count"]
     )
 
     return (
-        geo_log,
-        photo_log,
-        color_log,
-        scene_fail_log,
-        geo_writer,
-        photo_writer,
-        color_writer,
-        scene_fail_writer,
+        geo_log, photo_log, color_log, scene_fail_log,
+        geo_writer, photo_writer, color_writer, scene_fail_writer
     )
 
 
-# Feature Alignment (unchanged)
+# ================= ALIGNMENT =================
+
 def get_alignment_matrix(ref, img):
 
     ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
@@ -128,10 +129,7 @@ def get_alignment_matrix(ref, img):
     bf = cv2.BFMatcher()
     matches = bf.knnMatch(des1, des2, k=2)
 
-    good_matches = []
-    for m, n in matches:
-        if m.distance < 0.75 * n.distance:
-            good_matches.append(m)
+    good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
 
     if len(good_matches) < 20:
         return None, 0
@@ -149,7 +147,6 @@ def get_alignment_matrix(ref, img):
     return H, inlier_ratio
 
 
-# Photometric Alignment (unchanged)
 def photometric_align(ref, img):
 
     ref_f = ref.astype(np.float32)
@@ -164,7 +161,6 @@ def photometric_align(ref, img):
     return np.clip(corrected, 0, 255).astype(np.uint8)
 
 
-# Color Alignment (unchanged)
 def color_align(ref, img):
 
     ref_lab = cv2.cvtColor(ref, cv2.COLOR_BGR2LAB).astype(np.float32)
@@ -184,38 +180,37 @@ def color_align(ref, img):
 def deltaE(ref, img):
     ref_lab = cv2.cvtColor(ref, cv2.COLOR_BGR2LAB)
     img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-
     return float(np.mean(np.sqrt(np.sum((ref_lab.astype(np.float32) - img_lab.astype(np.float32))**2, axis=2))))
 
 
-# Main Pipeline
+# ================= MAIN =================
+
 def run_pipeline():
 
-    (
-        geo_log,
-        photo_log,
-        color_log,
-        scene_fail_log,
-        geo_writer,
-        photo_writer,
-        color_writer,
-        scene_fail_writer,
-    ) = init_logs()
+    logs = init_logs()
+    geo_log, photo_log, color_log, scene_fail_log = logs[:4]
+    geo_writer, photo_writer, color_writer, scene_fail_writer = logs[4:]
 
     output_dir = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "color")
+    ensure_dir(output_dir)
 
-    # ✅ RESTORED ORIGINAL SKIP LOGIC
-    finished_scenes = []
-    if os.path.exists(output_dir):
-        finished_scenes = [
-            d for d in os.listdir(output_dir)
-            if os.path.isdir(os.path.join(output_dir, d))
-        ]
+    print("DATASET ROOT:", DATASET_ROOT)
+    print("OUTPUT ROOT:", output_dir)
+
+    if not os.path.exists(DATASET_ROOT):
+        print("❌ DATASET ROOT NOT FOUND")
+        return
 
     scenes = sorted([
         s for s in os.listdir(DATASET_ROOT)
         if os.path.isdir(os.path.join(DATASET_ROOT, s))
     ])
+
+    if len(scenes) == 0:
+        print("❌ NO SCENES FOUND IN DATASET")
+        return
+
+    finished_scenes = set(os.listdir(output_dir)) if os.path.exists(output_dir) else set()
 
     for scene in tqdm(scenes, desc="Total Alignment Progress"):
 
@@ -230,13 +225,19 @@ def run_pipeline():
         gt_path = os.path.join(scene_path, f"{gt_prefix}.dng")
         other_path = os.path.join(scene_path, f"{other_prefix}.dng")
 
-        if not os.path.exists(gt_path) or not os.path.exists(other_path):
+        if not os.path.exists(gt_path):
+            print(f"Missing GT: {gt_path}")
+            continue
+
+        if not os.path.exists(other_path):
+            print(f"Missing other: {other_path}")
             continue
 
         gt = read_image(gt_path)
         other = read_image(other_path)
 
         if gt is None or other is None:
+            print(f"Failed reading images in {scene}")
             continue
 
         master_H, _ = get_alignment_matrix(gt, other)
@@ -247,6 +248,7 @@ def run_pipeline():
         cv2.imwrite(os.path.join(color_out, to_jpg(os.path.basename(gt_path))), gt)
 
         files = sorted([f for f in os.listdir(scene_path) if not f.startswith(gt_prefix)])
+
         scene_failed_files = []
 
         for file in tqdm(files, desc=f"Aligning {scene}", leave=False):
@@ -287,9 +289,7 @@ def run_pipeline():
 
             psnr_photo = compute_psnr(gt, photo_img)
 
-            # --- CONDITIONAL COLOR ALIGNMENT (RESTORED) ---
             dE_before = deltaE(gt, photo_img)
-
             candidate = color_align(gt, photo_img)
             dE_after_candidate = deltaE(gt, candidate)
 
@@ -305,7 +305,6 @@ def run_pipeline():
             psnr_final = compute_psnr(gt, final_img)
             ssim_val = compute_ssim(gt, final_img)
 
-            #overall pass
             geo_ok = mean_flow < FLOW_THRESHOLD
             photo_ok = mean_after < mean_before
             color_ok = dE_after <= dE_before
@@ -316,7 +315,6 @@ def run_pipeline():
             if not overall_pass:
                 scene_failed_files.append(file)
 
-            #FIXED LOG (correct column count)
             color_writer.writerow([
                 scene, file,
                 dE_before, dE_after,
@@ -338,7 +336,7 @@ def run_pipeline():
     color_log.close()
     scene_fail_log.close()
 
-    print("\nPipeline Complete.")
+    print("\n✅ Pipeline Complete.")
 
 
 if __name__ == "__main__":

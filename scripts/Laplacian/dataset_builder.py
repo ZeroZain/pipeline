@@ -1,44 +1,57 @@
 import os
 import cv2
-import json
 import csv
 import shutil
 import numpy as np
 import rawpy
-from tqdm import tqdm # Import tqdm for progress tracking
+from tqdm import tqdm
 
-# Configuration
+# ================= CONFIG =================
+
 DECODED_ROOT = "decoded_frames"
 DATASET_ROOT = "dataset"
 LOG_ROOT = "logs"
 
 LAPLACIAN_LOG_DIR = os.path.join(LOG_ROOT, "laplacian")
 SCENE_LOG = os.path.join(LOG_ROOT, "scene_selection_log.csv")
-STATE_FILE = os.path.join(DATASET_ROOT, "dataset_state.json")
 
-# --- REFINED SETTINGS ---
-MIN_BLUR_FRAMES = 10       
-BLUR_THRESHOLD_RATIO = 0.5 
-MAX_SCENES_PER_VIDEO = 2   
-SEARCH_WINDOW = 3          
+MIN_BLUR_FRAMES = 10
+BLUR_THRESHOLD_RATIO = 0.5
+MAX_SCENES_PER_VIDEO = 2
+SEARCH_WINDOW = 3
+
+# ==========================================
+
 
 def ensure_dirs():
+    """
+    Create required directories.
+    """
     os.makedirs(DATASET_ROOT, exist_ok=True)
     os.makedirs(LOG_ROOT, exist_ok=True)
     os.makedirs(LAPLACIAN_LOG_DIR, exist_ok=True)
 
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {"next_scene_id": 1, "processed_captures": []}
-    with open(STATE_FILE, "r") as f:
-        return json.load(f)
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=4)
+# ================= LOG-BASED CHECK =================
+
+def is_processed_from_logs(capture_name):
+    """
+    A capture is considered processed if both OIS and NON-OIS logs exist.
+    """
+    ois_log = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_ois.csv")
+    nonois_log = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_nonois.csv")
+
+    return os.path.exists(ois_log) and os.path.exists(nonois_log)
+
+
+# ================= IMAGE =================
 
 def read_image(path):
+    """
+    Read image from disk (supports DNG and standard formats).
+    """
     ext = os.path.splitext(path)[1].lower()
+
     if ext == ".dng":
         try:
             with rawpy.imread(path) as raw:
@@ -46,45 +59,80 @@ def read_image(path):
             return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         except:
             return None
-    else:
-        return cv2.imread(path)
+
+    return cv2.imread(path)
+
 
 def laplacian_score(image):
-    """Calculates image sharpness using the Variance of Laplacian."""
+    """
+    Compute sharpness using Laplacian variance.
+    """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
+
+# ================= FRAME SCORING =================
+
 def score_frames(folder, capture_name, cam_type):
-    if not os.path.exists(folder): return []
+    """
+    Load scores from log if available, otherwise compute and save.
+    """
+    log_file = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_{cam_type}.csv")
+
+    # ✅ LOAD existing log (fast)
+    if os.path.exists(log_file):
+        scores = []
+        with open(log_file, "r") as f:
+            reader = csv.reader(f)
+            next(reader)
+            for row in reader:
+                scores.append((row[0], float(row[1])))
+        return scores
+
+    # ❌ Otherwise compute
+    if not os.path.exists(folder):
+        return []
+
     files = sorted(os.listdir(folder))
     scores = []
-    
-    # Progress bar for frame scoring
-    for f in tqdm(files, desc=f"Scoring {cam_type}", leave=False):
+
+    for f in files:
         path = os.path.join(folder, f)
         img = read_image(path)
-        if img is None: continue
+
+        if img is None:
+            continue
+
         scores.append((f, laplacian_score(img)))
-    
-    log_file = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_{cam_type}.csv")
-    with open(log_file, "w", newline="") as csvfile:
-        writer = csv.writer(csvfile)
+
+    # Save log
+    with open(log_file, "w", newline="") as f:
+        writer = csv.writer(f)
         writer.writerow(["frame", "score"])
-        for f, s in scores:
-            writer.writerow([f, s])
+        writer.writerows(scores)
+
     return scores
 
+
+# ================= SEGMENT DETECTION =================
+
 def detect_segments(scores):
+    """
+    Detect blur segments using relative threshold.
+    """
     values = np.array([s for _, s in scores])
-    if len(values) == 0: return None, []
-    
+
+    if len(values) == 0:
+        return None, []
+
     sharp_idx = int(np.argmax(values))
     sharp_score = values[sharp_idx]
     blur_threshold = sharp_score * BLUR_THRESHOLD_RATIO
 
     segments = []
     current = []
+
     for i, v in enumerate(values):
         if v < blur_threshold:
             current.append(i)
@@ -92,22 +140,42 @@ def detect_segments(scores):
             if len(current) >= MIN_BLUR_FRAMES:
                 segments.append(current)
             current = []
+
     if len(current) >= MIN_BLUR_FRAMES:
         segments.append(current)
-    
+
     return sharp_idx, segments
 
+
+# ================= CSV =================
+
 def append_csv(file, header, row):
+    """
+    Append row to CSV (create with header if not exists).
+    """
     exists = os.path.exists(file)
-    with open(file, "a", newline="") as csvfile:
-        writer = csv.writer(csvfile)
+
+    with open(file, "a", newline="") as f:
+        writer = csv.writer(f)
+
         if not exists:
             writer.writerow(header)
+
         writer.writerow(row)
 
-def build_scene(scene_id, capture_name, ois_sharp, ois_blur, nonois_sharp, nonois_blur, ois_dir, nonois_dir):
+
+# ================= SCENE BUILD =================
+
+def build_scene(scene_id, capture_name,
+                ois_sharp, ois_blur,
+                nonois_sharp, nonois_blur,
+                ois_dir, nonois_dir):
+    """
+    Create dataset scene by copying selected frames.
+    """
     scene_name = f"scene_{scene_id:03d}"
     scene_path = os.path.join(DATASET_ROOT, scene_name)
+
     os.makedirs(scene_path, exist_ok=True)
 
     for src_dir, filename, label in [
@@ -117,141 +185,123 @@ def build_scene(scene_id, capture_name, ois_sharp, ois_blur, nonois_sharp, nonoi
         (nonois_dir, nonois_blur, "nonois_blur")
     ]:
         ext = os.path.splitext(filename)[1]
-        shutil.copy(os.path.join(src_dir, filename), os.path.join(scene_path, f"{label}{ext}"))
+
+        shutil.copy(
+            os.path.join(src_dir, filename),
+            os.path.join(scene_path, f"{label}{ext}")
+        )
 
     append_csv(
         SCENE_LOG,
-        ["scene", "capture", "ois_sharp", "ois_blur", "nonois_sharp", "nonois_blur"],
-        [scene_name, capture_name, ois_sharp, ois_blur, nonois_sharp, nonois_blur]
+        ["scene", "capture", "ois_sharp", "ois_blur",
+         "nonois_sharp", "nonois_blur"],
+        [scene_name, capture_name,
+         ois_sharp, ois_blur,
+         nonois_sharp, nonois_blur]
     )
+
     return scene_name
 
-def process_capture(capture_name, state):
+
+# ================= MAIN PROCESS =================
+
+def process_capture(capture_name, scene_id):
+    """
+    Process a single capture using log-based skipping.
+    """
+    if is_processed_from_logs(capture_name):
+        tqdm.write(f"Skipping (logs exist): {capture_name}")
+        return scene_id
 
     capture_path = os.path.join(DECODED_ROOT, capture_name)
+
+    tqdm.write(f"\n--- Processing {capture_name} ---")
+
     ois_dir = os.path.join(capture_path, "ois")
     nonois_dir = os.path.join(capture_path, "nonois")
-
-    print(f"\n--- Processing {capture_name} ---")
 
     ois_results = score_frames(ois_dir, capture_name, "ois")
     nonois_results = score_frames(nonois_dir, capture_name, "nonois")
 
     if not ois_results or not nonois_results:
-        return
+        return scene_id
+
+    _, blur_segments = detect_segments(ois_results)
+
+    if not blur_segments:
+        tqdm.write("No blur segments found.")
+        return scene_id
 
     values = np.array([s for _, s in ois_results])
 
-    sharp_score = np.max(values)
-    blur_threshold = sharp_score * BLUR_THRESHOLD_RATIO
-
-    # Detect blur segments
-    blur_segments = []
-    current = []
-
-    for i, v in enumerate(values):
-
-        if v < blur_threshold:
-            current.append(i)
-
-        else:
-            if len(current) >= MIN_BLUR_FRAMES:
-                blur_segments.append(current)
-            current = []
-
-    if len(current) >= MIN_BLUR_FRAMES:
-        blur_segments.append(current)
-
-    if not blur_segments:
-        return
-
-    # Sort segments by blur strength
     blur_segments.sort(key=lambda seg: np.mean([values[i] for i in seg]))
-
     top_segments = blur_segments[:MAX_SCENES_PER_VIDEO]
-
-    scene_list = []
 
     for segment in top_segments:
 
-        # Pick early blur frame (near motion start)
         blur_idx_ois = segment[2] if len(segment) > 2 else segment[0]
 
-        # Find sharp frame BEFORE blur
-        sharp_search_start = max(0, blur_idx_ois - 15)
-        sharp_search_end = blur_idx_ois
-
-        sharp_idx_ois = sharp_search_start + np.argmax(
-            values[sharp_search_start:sharp_search_end]
-        )
-
+        sharp_start = max(0, blur_idx_ois - 15)
+        sharp_idx_ois = sharp_start + np.argmax(values[sharp_start:blur_idx_ois])
         sharp_f_ois = ois_results[sharp_idx_ois][0]
 
-        # Find matching sharp in non-OIS
         s_start = max(0, sharp_idx_ois - SEARCH_WINDOW)
         s_end = min(len(nonois_results), sharp_idx_ois + SEARCH_WINDOW + 1)
 
-        best_nonois_sharp_entry = max(
-            nonois_results[s_start:s_end],
-            key=lambda x: x[1]
-        )
+        best_nonois_sharp = max(nonois_results[s_start:s_end], key=lambda x: x[1])
 
-        sharp_f_nonois = best_nonois_sharp_entry[0]
-        nonois_sharp_score = best_nonois_sharp_entry[1]
-        nonois_blur_threshold = nonois_sharp_score * BLUR_THRESHOLD_RATIO
+        sharp_f_nonois = best_nonois_sharp[0]
+        threshold = best_nonois_sharp[1] * BLUR_THRESHOLD_RATIO
 
-        # Find blur match in non-OIS
         b_start = max(0, blur_idx_ois - SEARCH_WINDOW)
         b_end = min(len(nonois_results), blur_idx_ois + SEARCH_WINDOW + 1)
 
-        nonois_blur_candidates = [
-            entry for entry in nonois_results[b_start:b_end]
-            if entry[1] <= nonois_blur_threshold
-        ]
+        candidates = [x for x in nonois_results[b_start:b_end] if x[1] <= threshold]
 
-        if not nonois_blur_candidates:
-            print(
-                f"Skipped segment in {capture_name}: "
-                f"no non-OIS blur <= 50% of non-OIS sharp near frame {blur_idx_ois}."
-            )
+        if not candidates:
             continue
 
-        worst_nonois_blur_entry = min(
-            nonois_blur_candidates,
-            key=lambda x: x[1]
-        )
+        worst_blur = min(candidates, key=lambda x: x[1])
 
-        blur_f_ois = ois_results[blur_idx_ois][0]
-        blur_f_nonois = worst_nonois_blur_entry[0]
-
-        scene_name = build_scene(
-            state["next_scene_id"],
+        build_scene(
+            scene_id,
             capture_name,
             sharp_f_ois,
-            blur_f_ois,
+            ois_results[blur_idx_ois][0],
             sharp_f_nonois,
-            blur_f_nonois,
+            worst_blur[0],
             ois_dir,
             nonois_dir
         )
 
-        scene_list.append(scene_name)
-        state["next_scene_id"] += 1
+        scene_id += 1
 
-    if scene_list:
-        state["processed_captures"].append(capture_name)
-        print(f"Done! Created {len(scene_list)} scenes.")
+    return scene_id
+
+
+# ================= ENTRY =================
 
 def main():
+    """
+    Main pipeline entry using log-based tracking.
+    """
     ensure_dirs()
-    state = load_state()
-    captures = sorted([d for d in os.listdir(DECODED_ROOT) if os.path.isdir(os.path.join(DECODED_ROOT, d))])
-    
-    # Progress bar for overall capture folders
+
+    captures = sorted([
+        d for d in os.listdir(DECODED_ROOT)
+        if os.path.isdir(os.path.join(DECODED_ROOT, d))
+    ])
+
+    processed_count = sum(1 for c in captures if is_processed_from_logs(c))
+
+    tqdm.write(f"Total captures: {len(captures)}")
+    tqdm.write(f"Already processed (from logs): {processed_count}")
+
+    scene_id = 1
+
     for capture in tqdm(captures, desc="Overall Progress"):
-        if capture in state["processed_captures"]: continue
-        process_capture(capture, state)
-        save_state(state)
+        scene_id = process_capture(capture, scene_id)
+
 
 if __name__ == "__main__":
     main()

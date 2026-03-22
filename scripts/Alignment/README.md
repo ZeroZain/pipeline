@@ -86,7 +86,7 @@ File extensions may be:
 
 Run this once:
 
-```
+```bash
 pip install opencv-python numpy scikit-image rawpy
 ```
 
