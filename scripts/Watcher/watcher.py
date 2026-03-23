@@ -6,341 +6,280 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # =====================================================
-# === PATH CONFIGURATION ===============================
+# === PATH CONFIG =====================================
 # =====================================================
 
-# Google Drive synced folder (input)
 WATCH_FOLDER = r"G:\My Drive\Thesis or Crisis\Videos\automationInput"
-
-# Local staging folder (temporary processing)
 STAGING_FOLDER = r"C:\Users\Windows 11\Documents\GitHub\pipeline\staging"
-
-# Final output folder (clean dataset)
 OUTPUT_FOLDER = r"C:\Users\Windows 11\Documents\GitHub\pipeline\decoded_frames"
 
-# Track processed folders to avoid duplicates
-processed_folders = set()
+# Queue + state
+processing_queue = []
+is_processing = False
+retry_limit = 2
+retry_counts = {}
 
 
 # =====================================================
-# === WATCHER: DETECT NEW FOLDERS ======================
-# =====================================================
-
-class WatcherHandler(FileSystemEventHandler):
-    """
-    Watches the input folder and triggers pipeline
-    when a new capture folder is created.
-    """
-
-    def on_created(self, event):
-        if event.is_directory:
-            folder_path = event.src_path
-
-            if folder_path in processed_folders:
-                return
-
-            print(f"\n[NEW FOLDER DETECTED] {folder_path}")
-
-            handle_pipeline(folder_path)
-            processed_folders.add(folder_path)
-
-
-# =====================================================
-# === HELPER: FIND ZIP FILES RECURSIVELY ===============
+# === HELPER: FIND ZIP FILES ===========================
 # =====================================================
 
 def find_zip_files(folder):
-    """
-    Recursively find all .zip files inside a folder.
-    Supports nested folder structures.
-    """
+    """Find all .zip files recursively"""
     zip_files = []
-
     for root, _, files in os.walk(folder):
         for f in files:
             if f.endswith(".zip"):
                 zip_files.append(os.path.join(root, f))
-
     return zip_files
 
 
+# =====================================================
+# === HELPER: FORMAT TIME ==============================
+# =====================================================
+
 def format_duration(seconds):
-    """
-    Convert seconds into human-readable format (HH:MM:SS)
-    """
+    """Convert seconds → HH:MM:SS"""
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
-
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
 
 # =====================================================
-# === WAIT FOR COMPLETE UPLOAD =========================
+# === HELPER: CHECK IF PROCESSED =======================
+# =====================================================
+
+def is_already_processed(folder_name):
+    """Check if already exists in output"""
+    return os.path.exists(os.path.join(OUTPUT_FOLDER, folder_name))
+
+
+# =====================================================
+# === WAIT FOR UPLOAD =================================
 # =====================================================
 
 def wait_for_complete_capture(folder_path, timeout=300):
-    """
-    Wait until:
-    - 'ois' and 'nonois' folders exist
-    - ZIP files exist (even if nested)
-    - ZIP files are fully uploaded (size stable)
-    """
+    """Wait until zip files exist and are stable"""
 
-    print("[WAITING] Ensuring full capture upload is complete...")
+    print("[WAITING] Checking upload completion...")
     start = time.time()
 
     while time.time() - start < timeout:
         try:
-            ois_path = os.path.join(folder_path, "ois")
-            nonois_path = os.path.join(folder_path, "nonois")
+            ois = os.path.join(folder_path, "ois")
+            nonois = os.path.join(folder_path, "nonois")
 
-            # Check subfolders exist
-            if not os.path.exists(ois_path) or not os.path.exists(nonois_path):
-                print("[WAITING] Missing subfolders...")
+            if not os.path.exists(ois) or not os.path.exists(nonois):
                 time.sleep(2)
                 continue
 
-            # Find zip files recursively
-            ois_zips = find_zip_files(ois_path)
-            nonois_zips = find_zip_files(nonois_path)
+            zips = find_zip_files(ois) + find_zip_files(nonois)
 
-            if not ois_zips or not nonois_zips:
-                print("[WAITING] ZIP files not yet available...")
+            if not zips:
                 time.sleep(2)
                 continue
 
-            # Check file stability
-            all_ready = True
+            stable = True
+            for f in zips:
+                s1 = os.path.getsize(f)
+                time.sleep(1)
+                s2 = os.path.getsize(f)
+                if s1 == 0 or s1 != s2:
+                    stable = False
 
-            for zip_list in [ois_zips, nonois_zips]:
-                for file_path in zip_list:
-                    size1 = os.path.getsize(file_path)
-                    time.sleep(1)
-                    size2 = os.path.getsize(file_path)
-
-                    if size1 == 0 or size1 != size2:
-                        all_ready = False
-
-            if all_ready:
-                print("[READY] Capture fully uploaded and stable")
+            if stable:
+                print("[READY] Upload complete")
                 return True
 
-        except Exception as e:
-            print(f"[WAIT ERROR] {e}")
+        except:
+            pass
 
         time.sleep(2)
 
-    print("[TIMEOUT] Capture may be incomplete")
+    print("[TIMEOUT] Proceeding anyway")
     return False
 
 
 # =====================================================
-# === MAIN PIPELINE ===================================
+# === PIPELINE ========================================
 # =====================================================
 
 def handle_pipeline(src_path):
-    """
-    Main pipeline:
-    1. Wait for upload completion
-    2. Copy to staging
-    3. Process (extract + clean)
-    4. Move to output
-    5. Measure execution time
-    """
+    """Full pipeline execution"""
 
     folder_name = os.path.basename(src_path)
+    print(f"[START] {folder_name}")
 
-    print(f"[DEBUG] Starting pipeline for {folder_name}")
-
-    # ⏱️ START TIMER
     start_time = time.time()
 
-    # Step 1: Wait for upload completion
-    wait_for_complete_capture(src_path)
+    try:
+        wait_for_complete_capture(src_path)
 
-    # Step 2: Copy to staging
-    staging_path = copy_to_staging(src_path)
+        staging_path = copy_to_staging(src_path)
+        if not staging_path:
+            raise Exception("Copy failed")
 
-    if not staging_path:
-        print("[ERROR] Copy failed, skipping")
-        return
+        process_capture_folder(staging_path)
+        move_to_output(staging_path)
 
-    # Step 3: Process files
-    process_capture_folder(staging_path)
+        duration = format_duration(time.time() - start_time)
+        print(f"[SUCCESS] {folder_name} ({duration})\n")
 
-    # Step 4: Move to output
-    move_to_output(staging_path)
+    except Exception as e:
+        print(f"[ERROR] {folder_name}: {e}")
 
-    # ⏱️ END TIMER
-    end_time = time.time()
-    duration = end_time - start_time
-
-    formatted_time = format_duration(duration)
-
-    print(f"[TIME] {folder_name} processed in {formatted_time}\n")
+        # Retry logic
+        count = retry_counts.get(folder_name, 0)
+        if count < retry_limit:
+            retry_counts[folder_name] = count + 1
+            print(f"[RETRY] {folder_name} (attempt {count + 1})")
+            processing_queue.append(src_path)
+        else:
+            print(f"[FAILED] {folder_name} exceeded retry limit\n")
 
 
 # =====================================================
-# === COPY TO STAGING =================================
+# === COPY ============================================
 # =====================================================
 
 def copy_to_staging(src_path):
-    """
-    Copy capture folder from Drive to local staging
-    """
+    """Copy to staging folder"""
 
-    folder_name = os.path.basename(src_path)
-    dst_path = os.path.join(STAGING_FOLDER, folder_name)
+    name = os.path.basename(src_path)
+    dst = os.path.join(STAGING_FOLDER, name)
 
-    print(f"[COPYING] {folder_name} → staging")
+    if os.path.exists(dst):
+        return dst
 
-    if os.path.exists(dst_path):
-        print("[SKIP] Already copied")
-        return dst_path
+    print(f"[COPY] {name}")
 
     try:
-        shutil.copytree(src_path, dst_path)
+        shutil.copytree(src_path, dst)
+        return dst
     except Exception as e:
-        print(f"[ERROR COPYING] {e}")
+        print(f"[COPY ERROR] {e}")
         return None
 
-    print("[COPIED] Successfully")
-    return dst_path
-
 
 # =====================================================
-# === PROCESS EXISTING FOLDERS =========================
+# === PROCESS =========================================
 # =====================================================
 
-def process_existing_folders():
-    """
-    Process folders that already exist before watcher starts
-    """
+def process_capture_folder(path):
+    """Extract + clean"""
 
-    print("[INIT] Checking existing folders...")
+    for sub in ["ois", "nonois"]:
+        sub_path = os.path.join(path, sub)
 
-    for folder in sorted(os.listdir(WATCH_FOLDER)):
-        folder_path = os.path.join(WATCH_FOLDER, folder)
-
-        if os.path.isdir(folder_path):
-            if folder_path in processed_folders:
-                continue
-
-            print(f"[FOUND EXISTING] {folder_path}")
-            handle_pipeline(folder_path)
-            processed_folders.add(folder_path)
-
-
-# =====================================================
-# === PROCESS CAPTURE =================================
-# =====================================================
-
-def process_capture_folder(capture_path):
-    """
-    Extract all ZIP files (even nested) and clean output
-    """
-
-    print(f"[PROCESSING] {capture_path}")
-
-    for subfolder in ["ois", "nonois"]:
-        subfolder_path = os.path.join(capture_path, subfolder)
-
-        if not os.path.exists(subfolder_path):
-            print(f"[WARNING] Missing {subfolder}")
+        if not os.path.exists(sub_path):
             continue
 
-        # Find all zip files recursively
-        zip_files = find_zip_files(subfolder_path)
+        zips = find_zip_files(sub_path)
 
-        # Extract each zip into root subfolder
-        for zip_path in zip_files:
-            extract_zip(zip_path, subfolder_path)
+        for z in zips:
+            extract_zip(z, sub_path)
 
-        # Clean unwanted files
-        clean_non_dng_files(subfolder_path)
+        clean_non_dng_files(sub_path)
 
 
 # =====================================================
-# === EXTRACT + FLATTEN ================================
+# === EXTRACT =========================================
 # =====================================================
 
 def extract_zip(zip_path, extract_to):
-    """
-    Extract ZIP and flatten nested structure
-    """
-
-    print(f"[EXTRACTING] {zip_path}")
+    """Extract zip and flatten"""
 
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_to)
-    except Exception as e:
-        print(f"[ERROR] Failed to extract: {e}")
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            z.extractall(extract_to)
+    except:
         return
 
-    extracted_name = os.path.splitext(os.path.basename(zip_path))[0]
-    extracted_folder = os.path.join(extract_to, extracted_name)
+    name = os.path.splitext(os.path.basename(zip_path))[0]
+    folder = os.path.join(extract_to, name)
 
-    # Flatten structure
-    if os.path.exists(extracted_folder):
-        for item in os.listdir(extracted_folder):
+    if os.path.exists(folder):
+        for item in os.listdir(folder):
             shutil.move(
-                os.path.join(extracted_folder, item),
+                os.path.join(folder, item),
                 os.path.join(extract_to, item)
             )
-
-        shutil.rmtree(extracted_folder)
-        print(f"[FLATTENED] {extracted_folder}")
+        shutil.rmtree(folder)
 
 
 # =====================================================
-# === CLEAN NON-DNG FILES ==============================
+# === CLEAN ===========================================
 # =====================================================
 
-def clean_non_dng_files(folder_path):
-    """
-    Remove all non-.dng files (including .zip, .ini, .wav)
-    """
+def clean_non_dng_files(folder):
+    """Remove non-DNG files"""
 
-    print(f"[CLEANING] {folder_path}")
-
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            if not file.lower().endswith(".dng"):
+    for root, _, files in os.walk(folder):
+        for f in files:
+            if not f.lower().endswith(".dng"):
                 try:
-                    os.remove(os.path.join(root, file))
+                    os.remove(os.path.join(root, f))
                 except:
                     pass
 
 
 # =====================================================
-# === MOVE TO OUTPUT ==================================
+# === MOVE ============================================
 # =====================================================
 
 def move_to_output(staging_path):
-    """
-    Move processed folder from staging to final output
-    """
+    """Move to final output"""
 
-    folder_name = os.path.basename(staging_path)
-    destination = os.path.join(OUTPUT_FOLDER, folder_name)
+    name = os.path.basename(staging_path)
+    dst = os.path.join(OUTPUT_FOLDER, name)
 
-    if os.path.exists(destination):
-        print("[SKIP] Already exists in output")
+    if os.path.exists(dst):
         return
 
-    try:
-        shutil.move(staging_path, destination)
+    shutil.move(staging_path, dst)
+    clean_non_dng_files(dst)
 
-        # Clean again (handles desktop.ini)
-        clean_non_dng_files(destination)
 
-        print(f"[DONE] Moved → {destination}")
-        print(f"[COMPLETE] {folder_name} processed\n")
+# =====================================================
+# === SCANNER =========================================
+# =====================================================
 
-    except Exception as e:
-        print(f"[ERROR MOVING] {e}")
+def scan_for_new_folders():
+    """Scan Drive and add new folders to queue"""
+
+    for folder in os.listdir(WATCH_FOLDER):
+        path = os.path.join(WATCH_FOLDER, folder)
+
+        if not os.path.isdir(path):
+            continue
+
+        if is_already_processed(folder):
+            continue
+
+        if path not in processing_queue:
+            print(f"[QUEUE] {folder}")
+            processing_queue.append(path)
+
+
+# =====================================================
+# === QUEUE PROCESSOR ================================
+# =====================================================
+
+def process_queue():
+    """Process one folder at a time"""
+
+    global is_processing
+
+    if is_processing or not processing_queue:
+        return
+
+    is_processing = True
+
+    src_path = processing_queue.pop(0)
+    handle_pipeline(src_path)
+
+    is_processing = False
 
 
 # =====================================================
@@ -348,20 +287,20 @@ def move_to_output(staging_path):
 # =====================================================
 
 if __name__ == "__main__":
-    # Process existing folders first
-    process_existing_folders()
 
-    # Start watcher for new folders
-    event_handler = WatcherHandler()
+    print("Pipeline started...")
+
+    # Watcher (optional trigger)
     observer = Observer()
-    observer.schedule(event_handler, WATCH_FOLDER, recursive=False)
+    observer.schedule(WatcherHandler(), WATCH_FOLDER, recursive=False)
     observer.start()
-
-    print("Watching for new capture folders...")
 
     try:
         while True:
-            time.sleep(1)
+            scan_for_new_folders()   # detect new
+            process_queue()          # process one
+            time.sleep(5)
+
     except KeyboardInterrupt:
         observer.stop()
         observer.join()
