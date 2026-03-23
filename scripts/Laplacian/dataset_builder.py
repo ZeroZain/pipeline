@@ -14,13 +14,17 @@ LOG_ROOT = "logs"
 
 LAPLACIAN_LOG_DIR = os.path.join(LOG_ROOT, "laplacian")
 SCENE_LOG = os.path.join(LOG_ROOT, "scene_selection_log.csv")
+BAD_LOG = os.path.join(LOG_ROOT, "bad_samples.csv")
 
 MIN_BLUR_FRAMES = 10
 MAX_SCENES_PER_VIDEO = 2
 SEARCH_WINDOW = 3
-BLUR_PERCENTILE = 40  # relative blur threshold
+BLUR_PERCENTILE = 40
 
-# Debug options
+# Quality controls
+STRICT_MODE = True
+MIN_SHARPNESS = 0.1
+
 DEBUG_MODE = True
 DEBUG_OUTPUT = "debug_vis"
 
@@ -34,10 +38,19 @@ def ensure_dirs():
     if DEBUG_MODE:
         os.makedirs(DEBUG_OUTPUT, exist_ok=True)
 
-# ================= LOG CHECK =================
+# ================= LOG =================
+
+def append_csv(file, header, row):
+    """Append row to CSV."""
+    exists = os.path.exists(file)
+    with open(file, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not exists:
+            writer.writerow(header)
+        writer.writerow(row)
 
 def is_processed_from_logs(capture_name):
-    """Check if capture already processed using existing logs."""
+    """Skip already processed captures."""
     ois_log = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_ois.csv")
     nonois_log = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_nonois.csv")
     return os.path.exists(ois_log) and os.path.exists(nonois_log)
@@ -45,17 +58,15 @@ def is_processed_from_logs(capture_name):
 # ================= IMAGE =================
 
 def read_image(path):
-    """Read image (supports RAW and standard formats)."""
+    """Read RAW or standard image."""
     ext = os.path.splitext(path)[1].lower()
 
     if ext == ".dng":
         try:
             with rawpy.imread(path) as raw:
-                rgb = raw.postprocess(
-                    use_camera_wb=True,
-                    no_auto_bright=True,
-                    output_bps=8
-                )
+                rgb = raw.postprocess(use_camera_wb=True,
+                                      no_auto_bright=True,
+                                      output_bps=8)
             return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         except:
             return None
@@ -65,27 +76,21 @@ def read_image(path):
 # ================= SHARPNESS =================
 
 def laplacian_score(image):
-    """Compute noise-robust sharpness score."""
+    """Noise-aware sharpness score."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Denoise to suppress noise influence
     denoised = cv2.bilateralFilter(gray, 7, 50, 50)
-
-    # Edge strength
     lap = cv2.Laplacian(denoised, cv2.CV_64F).var()
-
-    # Noise estimate
     noise = np.std(gray.astype(np.float32) - denoised.astype(np.float32))
 
     return float(lap - 0.5 * noise)
 
-# ================= FRAME SCORING =================
+# ================= SCORING =================
 
 def score_frames(folder, capture_name, cam_type):
-    """Compute or load sharpness scores."""
+    """Compute or load frame scores."""
     log_file = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_{cam_type}.csv")
 
-    # Load existing scores
     if os.path.exists(log_file):
         scores = []
         with open(log_file, "r") as f:
@@ -98,16 +103,14 @@ def score_frames(folder, capture_name, cam_type):
     if not os.path.exists(folder):
         return []
 
-    files = sorted(os.listdir(folder))
     scores = []
-
-    for f in tqdm(files, desc=f"Scoring {capture_name}-{cam_type}", leave=False):
+    for f in tqdm(sorted(os.listdir(folder)),
+                  desc=f"Scoring {capture_name}-{cam_type}", leave=False):
         img = read_image(os.path.join(folder, f))
         if img is None:
             continue
         scores.append((f, laplacian_score(img)))
 
-    # Save scores
     with open(log_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["frame", "score"])
@@ -115,20 +118,22 @@ def score_frames(folder, capture_name, cam_type):
 
     return scores
 
-# ================= SEGMENT DETECTION =================
+# ================= SEGMENT =================
 
 def detect_segments(scores):
-    """Detect blur segments using percentile threshold."""
+    """Detect blur segments using normalized percentile."""
     values = np.array([s for _, s in scores])
 
     if len(values) == 0:
         return None, []
 
+    # Normalize scores (important improvement)
+    values = (values - np.mean(values)) / (np.std(values) + 1e-6)
+
     sharp_idx = int(np.argmax(values))
     threshold = np.percentile(values, BLUR_PERCENTILE)
 
-    segments = []
-    current = []
+    segments, current = [], []
 
     for i, v in enumerate(values):
         if v <= threshold:
@@ -146,65 +151,54 @@ def detect_segments(scores):
 # ================= VALIDATION =================
 
 def validate_selection(sharp_score, blur_score):
-    """Check if sharp and blur separation is sufficient."""
+    """Check sharp vs blur separation."""
     diff = sharp_score - blur_score
     return diff >= 0.1, diff
 
 # ================= DEBUG =================
 
-def visualize_selection(scene_id, sharp_img, blur_img, sharp_score, blur_score):
-    """Save side-by-side visualization of selected frames."""
-    if sharp_img is None or blur_img is None:
+def visualize_selection(scene_id, imgs, scores):
+    """Visualize 4 images with scores."""
+    if any(img is None for img in imgs):
         return
 
-    vis = np.hstack([sharp_img, blur_img])
+    h = min(img.shape[0] for img in imgs)
+    imgs = [cv2.resize(img, (int(img.shape[1]*h/img.shape[0]), h)) for img in imgs]
 
-    cv2.putText(vis, f"SHARP: {sharp_score:.3f}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+    vis = np.hstack(imgs)
 
-    cv2.putText(vis, f"BLUR: {blur_score:.3f}",
-                (sharp_img.shape[1] + 10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+    labels = ["OIS SHARP", "OIS BLUR", "NON-OIS SHARP", "NON-OIS BLUR"]
 
-    out_path = os.path.join(DEBUG_OUTPUT, f"scene_{scene_id:03d}.jpg")
-    cv2.imwrite(out_path, vis)
+    x = 0
+    for i, img in enumerate(imgs):
+        text = f"{labels[i]} | {scores[i]:.2f}"
+        cv2.putText(vis, text, (x + 10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0,255,0) if "SHARP" in labels[i] else (0,0,255), 2)
+        x += img.shape[1]
 
-# ================= CSV =================
+    cv2.imwrite(os.path.join(DEBUG_OUTPUT, f"scene_{scene_id:03d}.jpg"), vis)
 
-def append_csv(file, header, row):
-    """Append row to CSV file."""
-    exists = os.path.exists(file)
-
-    with open(file, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not exists:
-            writer.writerow(header)
-        writer.writerow(row)
-
-# ================= SCENE BUILD =================
+# ================= SCENE =================
 
 def build_scene(scene_id, capture_name,
                 ois_sharp, ois_blur,
                 nonois_sharp, nonois_blur,
                 ois_dir, nonois_dir):
-    """Copy selected frames into dataset structure."""
+    """Copy frames + log."""
     scene_name = f"scene_{scene_id:03d}"
     scene_path = os.path.join(DATASET_ROOT, scene_name)
-
     os.makedirs(scene_path, exist_ok=True)
 
-    for src_dir, filename, label in [
+    for src, file, label in [
         (ois_dir, ois_sharp, "ois_sharp"),
         (ois_dir, ois_blur, "ois_blur"),
         (nonois_dir, nonois_sharp, "nonois_sharp"),
         (nonois_dir, nonois_blur, "nonois_blur")
     ]:
-        ext = os.path.splitext(filename)[1]
-
-        shutil.copy(
-            os.path.join(src_dir, filename),
-            os.path.join(scene_path, f"{label}{ext}")
-        )
+        ext = os.path.splitext(file)[1]
+        shutil.copy(os.path.join(src, file),
+                    os.path.join(scene_path, f"{label}{ext}"))
 
     append_csv(
         SCENE_LOG,
@@ -215,12 +209,10 @@ def build_scene(scene_id, capture_name,
          nonois_sharp, nonois_blur]
     )
 
-    return scene_name
-
 # ================= MAIN =================
 
 def process_capture(capture_name, scene_id):
-    """Process capture: scoring, detection, pairing, validation."""
+    """Process one capture."""
     if is_processed_from_logs(capture_name):
         tqdm.write(f"Skipping: {capture_name}")
         return scene_id
@@ -230,58 +222,113 @@ def process_capture(capture_name, scene_id):
     ois_dir = os.path.join(capture_path, "ois")
     nonois_dir = os.path.join(capture_path, "nonois")
 
-    ois_results = score_frames(ois_dir, capture_name, "ois")
-    nonois_results = score_frames(nonois_dir, capture_name, "nonois")
+    ois = score_frames(ois_dir, capture_name, "ois")
+    nonois = score_frames(nonois_dir, capture_name, "nonois")
 
-    if not ois_results or not nonois_results:
+    if not ois or not nonois:
         return scene_id
 
-    _, blur_segments = detect_segments(ois_results)
-    if not blur_segments:
+    _, segments = detect_segments(ois)
+    if not segments:
         return scene_id
 
-    values = np.array([s for _, s in ois_results])
-    blur_segments.sort(key=lambda seg: np.mean([values[i] for i in seg]))
+    values = np.array([s for _, s in ois])
+    segments.sort(key=lambda seg: np.mean([values[i] for i in seg]))
 
-    for segment in blur_segments[:MAX_SCENES_PER_VIDEO]:
+    for seg in segments[:MAX_SCENES_PER_VIDEO]:
 
-        blur_idx = segment[len(segment)//2]
+        blur_idx = seg[len(seg)//2]
 
+        # Find sharp frame before blur
         sharp_start = max(0, blur_idx - 15)
         sharp_idx = sharp_start + np.argmax(values[sharp_start:blur_idx])
-
-        sharp_file = ois_results[sharp_idx][0]
-        blur_file = ois_results[blur_idx][0]
 
         sharp_score = values[sharp_idx]
         blur_score = values[blur_idx]
 
-        valid, diff = validate_selection(sharp_score, blur_score)
-        if not valid:
-            tqdm.write(f"⚠️ Weak separation ({diff:.3f}) in {capture_name}")
+        # Skip weak sharp frames
+        if sharp_score < MIN_SHARPNESS:
+            continue
 
-        # Debug visualization
-        if DEBUG_MODE:
-            sharp_img = read_image(os.path.join(ois_dir, sharp_file))
-            blur_img = read_image(os.path.join(ois_dir, blur_file))
-            visualize_selection(scene_id, sharp_img, blur_img, sharp_score, blur_score)
+        # ================= NON-OIS MATCHING =================
 
-        # Match NON-OIS frames
         s_start = max(0, sharp_idx - SEARCH_WINDOW)
-        s_end = min(len(nonois_results), sharp_idx + SEARCH_WINDOW + 1)
-
-        best_nonois_sharp = max(nonois_results[s_start:s_end], key=lambda x: x[1])
+        s_end = min(len(nonois), sharp_idx + SEARCH_WINDOW + 1)
+        if s_start >= s_end:
+            continue
 
         b_start = max(0, blur_idx - SEARCH_WINDOW)
-        b_end = min(len(nonois_results), blur_idx + SEARCH_WINDOW + 1)
+        b_end = min(len(nonois), blur_idx + SEARCH_WINDOW + 1)
+        if b_start >= b_end:
+            continue
 
-        worst_nonois_blur = min(nonois_results[b_start:b_end], key=lambda x: x[1])
+        best_nonois_sharp = max(nonois[s_start:s_end], key=lambda x: x[1])
+        worst_nonois_blur = min(nonois[b_start:b_end], key=lambda x: x[1])
+
+        # ================= VALIDATION =================
+
+        valid, diff = validate_selection(sharp_score, blur_score)
+
+        if not valid:
+            append_csv(
+                BAD_LOG,
+                [
+                    "capture",
+                    "scene_id",
+                    "ois_sharp_frame",
+                    "ois_blur_frame",
+                    "nonois_sharp_frame",
+                    "nonois_blur_frame",
+                    "ois_sharp_score",
+                    "ois_blur_score",
+                    "nonois_sharp_score",
+                    "nonois_blur_score",
+                    "diff"
+                ],
+                [
+                    capture_name,
+                    scene_id,
+                    ois[sharp_idx][0],
+                    ois[blur_idx][0],
+                    best_nonois_sharp[0],
+                    worst_nonois_blur[0],
+                    sharp_score,
+                    blur_score,
+                    best_nonois_sharp[1],
+                    worst_nonois_blur[1],
+                    diff
+                ]
+            )
+
+            if STRICT_MODE:
+                continue
+
+        # ================= DEBUG =================
+
+        if DEBUG_MODE:
+            imgs = [
+                read_image(os.path.join(ois_dir, ois[sharp_idx][0])),
+                read_image(os.path.join(ois_dir, ois[blur_idx][0])),
+                read_image(os.path.join(nonois_dir, best_nonois_sharp[0])),
+                read_image(os.path.join(nonois_dir, worst_nonois_blur[0]))
+            ]
+
+            scores = [
+                sharp_score,
+                blur_score,
+                best_nonois_sharp[1],
+                worst_nonois_blur[1]
+            ]
+
+            visualize_selection(scene_id, imgs, scores)
+
+        # ================= BUILD =================
 
         build_scene(
             scene_id,
             capture_name,
-            sharp_file,
-            blur_file,
+            ois[sharp_idx][0],
+            ois[blur_idx][0],
             best_nonois_sharp[0],
             worst_nonois_blur[0],
             ois_dir,
@@ -295,7 +342,7 @@ def process_capture(capture_name, scene_id):
 # ================= ENTRY =================
 
 def main():
-    """Run dataset construction pipeline."""
+    """Run pipeline."""
     ensure_dirs()
 
     captures = sorted([
