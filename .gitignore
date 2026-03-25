@@ -7,6 +7,7 @@ dataset_256/
 aligned/
 decoded_frames/
 logs/
+debug_vis
 
 # Ignore Python cache files
 __pycache__/
