@@ -17,6 +17,8 @@ GT_SOURCE = "ois"
 GEO_INLIER_THRESHOLD = 0.1
 FLOW_THRESHOLD = 15.0
 SSIM_THRESHOLD = 0.75
+ECC_MAX_ITERS = 100
+ECC_EPS = 1e-6
 
 # ================= IO =================
 
@@ -142,6 +144,31 @@ def get_alignment_matrix(ref, img):
     return H, ratio
 
 
+def get_ecc_affine_matrix(ref, img):
+    ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+    warp = np.eye(2, 3, dtype=np.float32)
+    criteria = (
+        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+        ECC_MAX_ITERS,
+        ECC_EPS
+    )
+
+    try:
+        _, warp = cv2.findTransformECC(
+            ref_gray,
+            img_gray,
+            warp,
+            cv2.MOTION_AFFINE,
+            criteria
+        )
+    except cv2.error:
+        return None
+
+    return np.vstack([warp, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
+
+
 # ================= COLOR =================
 
 def photometric_align(ref, img):
@@ -176,46 +203,42 @@ def color_align(ref, img):
 # ================= DEBUG =================
 
 def save_alignment_visual(scene,
-                          ois_sharp, ois_blur,
-                          nonois_raw, nonois_aligned,
-                          blur_before, blur_after,
-                          ssim_val, dE, flow):
+                          ois_sharp_raw, ois_blur_raw,
+                          nonois_sharp_raw, nonois_blur_raw,
+                          ois_sharp_proc, ois_blur_proc,
+                          nonois_sharp_proc, nonois_blur_proc):
 
     if any(img is None for img in [
-        ois_sharp, ois_blur,
-        nonois_raw, nonois_aligned,
-        blur_before, blur_after
+        ois_sharp_raw, ois_blur_raw,
+        nonois_sharp_raw, nonois_blur_raw,
+        ois_sharp_proc, ois_blur_proc,
+        nonois_sharp_proc, nonois_blur_proc
     ]):
         return
 
     ensure_dir(DEBUG_ALIGN_DIR)
 
-    h, w = ois_sharp.shape[:2]
+    h, w = ois_sharp_raw.shape[:2]
 
-    top = np.hstack([ois_sharp, ois_blur, nonois_raw, blur_before])
-    bottom = np.hstack([ois_sharp, ois_blur, nonois_aligned, blur_after])
+    top = np.hstack([ois_sharp_raw, ois_blur_raw, nonois_sharp_raw, nonois_blur_raw])
+    bottom = np.hstack([ois_sharp_proc, ois_blur_proc, nonois_sharp_proc, nonois_blur_proc])
 
     vis = np.vstack([top, bottom])
 
-    labels_top = ["OIS SHARP", "OIS BLUR", "NONOIS RAW", "BLUR RAW"]
-    labels_bot = ["OIS SHARP", "OIS BLUR", "NONOIS ALIGNED", "BLUR ALIGNED"]
+    labels_top = ["OIS SHARP\n(RAW)", "OIS BLUR\n(RAW)", "NONOIS SHARP\n(RAW)", "NONOIS BLUR\n(RAW)"]
+    labels_bot = ["OIS SHARP\n(GT)", "OIS BLUR\n(PROC)", "NONOIS SHARP\n(PROC)", "NONOIS BLUR\n(PROC)"]
 
     for i, label in enumerate(labels_top):
-        cv2.putText(vis, label, (i*w + 10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+        lines = label.split("\n")
+        for j, line in enumerate(lines):
+            cv2.putText(vis, line, (i*w + 10, 25 + j*20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
 
     for i, label in enumerate(labels_bot):
-        cv2.putText(vis, label, (i*w + 10, h + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
-
-    cv2.putText(vis, f"SSIM {ssim_val:.3f}", (10, 2*h - 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-
-    cv2.putText(vis, f"dE {dE:.2f}", (300, 2*h - 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-
-    cv2.putText(vis, f"Flow {flow:.2f}", (550, 2*h - 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        lines = label.split("\n")
+        for j, line in enumerate(lines):
+            cv2.putText(vis, line, (i*w + 10, h + 25 + j*20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
 
     cv2.imwrite(os.path.join(DEBUG_ALIGN_DIR, f"{scene}.jpg"), vis)
 
@@ -229,8 +252,8 @@ def run_pipeline():
         geo_writer, photo_writer, color_writer, scene_fail_writer
     ) = init_logs()
 
-    output_dir = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "color")
-    ensure_dir(output_dir)
+    output_root = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "color")
+    ensure_dir(output_root)
 
     scenes = sorted([
         s for s in os.listdir(DATASET_ROOT)
@@ -240,6 +263,8 @@ def run_pipeline():
     for scene in tqdm(scenes):
 
         scene_path = os.path.join(DATASET_ROOT, scene)
+        scene_output_dir = os.path.join(output_root, scene)
+        ensure_dir(scene_output_dir)
 
         gt = read_image(os.path.join(scene_path, "ois_sharp.dng"))
         nonois = read_image(os.path.join(scene_path, "nonois_sharp.dng"))
@@ -266,18 +291,40 @@ def run_pipeline():
 
         scene_failed = []
 
+        # Storage for debug visualization
+        ois_blur_raw = None
+        nonois_sharp_raw = nonois
+        nonois_blur_raw = None
+        ois_blur_proc = None
+        nonois_sharp_proc = aligned_nonois
+        nonois_blur_proc = None
+
         for file in os.listdir(scene_path):
 
-            if "ois_sharp" in file:
+            stem = os.path.splitext(file)[0].lower()
+            if stem == "ois_sharp":
                 continue
+
+            # Identify which file type we're processing using exact stem matching
+            is_ois_blur = stem == "ois_blur"
+            is_nonois_sharp = stem == "nonois_sharp"
+            is_nonois_blur = stem == "nonois_blur"
 
             img = read_image(os.path.join(scene_path, file))
             if img is None:
                 continue
 
+            # Store raw versions for debug output
+            if is_ois_blur:
+                ois_blur_raw = img.copy()
+            elif is_nonois_sharp:
+                nonois_sharp_raw = img.copy()
+            elif is_nonois_blur:
+                nonois_blur_raw = img.copy()
+
             H_direct, ratio = get_alignment_matrix(gt, img)
 
-            used_fallback = False
+            fallback_mode = "none"
 
             if H_direct is not None and ratio >= GEO_INLIER_THRESHOLD:
                 H_final = H_direct
@@ -286,9 +333,22 @@ def run_pipeline():
 
                 if H_blur_to_nonois is not None and H_nonois_to_ois is not None:
                     H_final = H_nonois_to_ois @ H_blur_to_nonois
-                    used_fallback = True
+                    fallback_mode = "chain"
+                elif H_direct is not None:
+                    # Keep processing even when inlier ratio is low.
+                    H_final = H_direct
+                    fallback_mode = "direct_low_inlier"
                 else:
-                    continue
+                    H_ecc = get_ecc_affine_matrix(gt, img)
+
+                    if H_ecc is not None:
+                        H_final = H_ecc
+                        fallback_mode = "ecc_affine"
+                    else:
+                        # Last-resort fallback to avoid skipping an entire scene.
+                        H_final = np.eye(3, dtype=np.float32)
+                        fallback_mode = "identity"
+                        scene_failed.append(f"{file}|IDENTITY_FALLBACK")
 
             geo_img = cv2.warpPerspective(img, H_final, (gt.shape[1], gt.shape[0]))
 
@@ -301,9 +361,22 @@ def run_pipeline():
             mean_flow = float(np.mean(np.sqrt(flow[...,0]**2 + flow[...,1]**2)))
             geo_ok = mean_flow < FLOW_THRESHOLD
 
-            geo_writer.writerow([scene, file, ratio, mean_flow, geo_ok, used_fallback])
+            geo_writer.writerow([
+                scene,
+                file,
+                ratio,
+                mean_flow,
+                geo_ok,
+                fallback_mode
+            ])
 
             photo_img = photometric_align(gt, geo_img)
+
+            mean_before = abs(np.mean(gt) - np.mean(geo_img))
+            mean_after = abs(np.mean(gt) - np.mean(photo_img))
+            photo_ok = mean_after < mean_before
+
+            photo_writer.writerow([scene, file, mean_before, mean_after, photo_ok])
             dE_before = deltaE(gt, photo_img)
 
             candidate = color_align(gt, photo_img)
@@ -319,23 +392,60 @@ def run_pipeline():
             if not overall_pass:
                 scene_failed.append(file)
 
-            save_alignment_visual(
-                scene,
-                gt,
-                ois_blur_img if ois_blur_img is not None else gt,
-                nonois,
-                aligned_nonois,
-                img,
-                final_img,
-                ssim_val,
-                dE_after,
-                mean_flow
-            )
+            color_writer.writerow([
+                scene, file,
+                dE_before, dE_after,
+                ssim_val, dE_after_candidate < dE_before, overall_pass
+            ])
+
+            # Store processed version for debug output
+            if is_ois_blur:
+                ois_blur_proc = final_img.copy()
+            elif is_nonois_sharp:
+                nonois_sharp_proc = final_img.copy()
+            elif is_nonois_blur:
+                nonois_blur_proc = final_img.copy()
+
+            # Map input filename to clean output name
+            if is_ois_blur:
+                output_name = "ois_blur.jpg"
+            elif is_nonois_sharp:
+                output_name = "nonois_sharp.jpg"
+            elif is_nonois_blur:
+                output_name = "nonois_blur.jpg"
+            else:
+                continue
 
             cv2.imwrite(
-                os.path.join(output_dir, f"{scene}_{file}.jpg"),
+                os.path.join(scene_output_dir, output_name),
                 final_img
             )
+
+        # Save ois_sharp (ground truth reference)
+        cv2.imwrite(
+            os.path.join(scene_output_dir, "ois_sharp.jpg"),
+            gt
+        )
+
+        # Create comprehensive scene visualization after all files are processed
+        save_alignment_visual(
+            scene,
+            gt,
+            ois_blur_raw,
+            nonois_sharp_raw,
+            nonois_blur_raw,
+            gt,
+            ois_blur_proc,
+            nonois_sharp_proc,
+            nonois_blur_proc
+        )
+
+        if scene_failed:
+            scene_fail_writer.writerow([
+                scene,
+                ";".join(scene_failed),
+                len(scene_failed)
+            ])
 
     print("pipeline complete")
 

@@ -17,10 +17,17 @@ LAPLACIAN_LOG_DIR = os.path.join(LOG_ROOT, "laplacian")
 SCENE_LOG = os.path.join(LOG_ROOT, "scene_selection_log.csv")
 STATE_FILE = os.path.join(DATASET_ROOT, "dataset_state.json")
 
-MAX_SCENES_PER_VIDEO = 2
-BLUR_PERCENTILE = 30
-MAX_BLUR_SEARCH = 8
-SEARCH_WINDOW = 5
+MAX_SCENES_PER_VIDEO = 1 
+BLUR_PERCENTILE = 30 # When determining the sharpness threshold for a video, use this percentile of the OIS sharpness scores. Adjust based on your data. 30 means using the 30th percentile, 20 means using the 20th percentile (more aggressive), 40 means using the 40th percentile (more conservative), etc.
+SEARCH_WINDOW = 5 # When matching sharp and blurry frames between OIS and non-OIS, only search within this window size around the detected indices. Adjust based on how closely the two cameras are synchronized. 5 means searching 5 frames before and after, 10 means searching 10 frames before and after, etc.
+
+# controls transition detection and frame pick ranges
+SHARP_WINDOW = 10
+BLUR_WINDOW = 4
+BLUR_TO_SHARP_MAX_RATIO = 0.7 # A blur frame must have a sharpness score no more than this ratio of its paired sharp frame to be considered valid. Adjust based on your data. 0.7 means the blur frame can be at most 70% as sharp as the sharp frame, 0.5 means it can be at most 50% as sharp, etc.
+
+DROP_RATIO = 1.1 # A frame is considered a transition if the sharpness drops by at least this factor compared to the previous frame. Adjust based on your data. 1.1 means a 10% drop, 1.2 means a 20% drop, etc.
+STABLE_CHECK = 3 # After detecting a potential transition, check the next STABLE_CHECK frames to ensure they remain blurry (i.e., their sharpness does not rise back above the threshold). Adjust based on how long you expect the blur to last. 3 means checking the next 3 frames, 5 means checking the next 5 frames, etc.
 
 DEBUG_MODE = True
 DEBUG_OUTPUT = "debug_vis"
@@ -98,30 +105,27 @@ def score_frames(folder, capture_name, cam_type):
 
     return scores
 
-# ================= SEGMENTS =================
+# ================= TRANSITION DETECTION =================
 
-def build_segments(values, threshold):
-    segments = []
-    current = [0]
+def find_transitions(values):
+    transitions = []
 
-    def get_type(v):
-        return "sharp" if v > threshold else "blur"
+    for i in range(1, len(values) - STABLE_CHECK):
 
-    for i in range(1, len(values)):
-        if get_type(values[i]) == get_type(values[i - 1]):
-            current.append(i)
-        else:
-            segments.append(current)
-            current = [i]
+        prev = values[i - 1]
+        curr = values[i]
 
-    segments.append(current)
-    return segments
+        if prev > curr:
+            ratio = prev / (curr + 1e-6)
 
-# ================= BLUR SELECTION =================
+            if ratio >= DROP_RATIO:
 
-def select_blur(values, segment):
-    candidates = segment[:MAX_BLUR_SEARCH]
-    return min(candidates, key=lambda x: values[x])
+                future = values[i:i + STABLE_CHECK]
+
+                if all(v <= curr * 1.05 for v in future):
+                    transitions.append(i)
+
+    return transitions
 
 # ================= DEBUG =================
 
@@ -211,30 +215,43 @@ def process_capture(capture_name, scene_id):
 
     threshold_ois = np.percentile(ois_values, BLUR_PERCENTILE)
 
-    ois_segments = build_segments(ois_values, threshold_ois)
+    transitions = find_transitions(ois_values)
+
     scene_count = 0
 
-    for i in range(len(ois_segments) - 1):
+    for t in transitions:
 
         if scene_count >= MAX_SCENES_PER_VIDEO:
             break
 
-        sharp_seg = ois_segments[i]
-        blur_seg = ois_segments[i + 1]
+        sharp_start = max(0, t - SHARP_WINDOW)
+        sharp_end = t
 
-        if ois_values[sharp_seg[0]] <= threshold_ois:
-            continue
-        if ois_values[blur_seg[0]] > threshold_ois:
+        blur_start = t
+        blur_end = min(len(ois_values), t + BLUR_WINDOW)
+
+        sharp_seg = list(range(sharp_start, sharp_end))
+        blur_seg = list(range(blur_start, blur_end))
+
+        if len(sharp_seg) < 5 or len(blur_seg) == 0:
             continue
 
         sharp_idx = max(sharp_seg, key=lambda x: ois_values[x])
-        blur_idx = select_blur(ois_values, blur_seg)
+        # Blur is chosen only within its own post-drop window.
+        blur_idx = min(blur_seg, key=lambda x: ois_values[x])
 
-        # match non-OIS frames near OIS indices
+        # validation
+        if ois_values[sharp_idx] <= threshold_ois:
+            continue
+
+        # Blur frame must be significantly blurrier than its paired sharp frame.
+        if ois_values[blur_idx] > (ois_values[sharp_idx] * BLUR_TO_SHARP_MAX_RATIO):
+            continue
+
+        # non-OIS matching
         sharp_idx_nonois = min(range(len(nonois_values)), key=lambda x: abs(x - sharp_idx))
         blur_idx_nonois = min(range(len(nonois_values)), key=lambda x: abs(x - blur_idx))
 
-        # refine within window
         s_start = max(0, sharp_idx_nonois - SEARCH_WINDOW)
         s_end = min(len(nonois_values), sharp_idx_nonois + SEARCH_WINDOW)
 
