@@ -3,6 +3,9 @@ import cv2
 import csv
 import json
 import shutil
+import argparse
+import subprocess
+import sys
 import numpy as np
 import rawpy
 from tqdm import tqdm
@@ -294,9 +297,52 @@ def process_capture(capture_name, scene_id):
 
     return scene_id
 
+
+def ask_yes_no(prompt, default=False):
+    default_hint = "Y/n" if default else "y/N"
+
+    while True:
+        answer = input(f"{prompt} [{default_hint}]: ").strip().lower()
+
+        if not answer:
+            return default
+
+        if answer in ("y", "yes"):
+            return True
+
+        if answer in ("n", "no"):
+            return False
+
+        print("Please answer with 'y' or 'n'.")
+
+
+def run_alignment_pipeline(run_full_pipeline):
+    if not run_full_pipeline:
+        print("Laplacian stage complete. Alignment and interpolation were not started.")
+        return
+
+    align_script = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "Alignment", "align2.py")
+    )
+
+    command = [sys.executable, align_script, "--run-next"]
+
+    print("Laplacian stage complete. Starting alignment + interpolation...")
+    subprocess.run(command, check=True)
+
 # ================= MAIN =================
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Select scenes using Laplacian sharpness and optionally continue the full pipeline."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["lap", "full"],
+        help="lap = run only this script, full = continue with align2.py then 256.py"
+    )
+    args = parser.parse_args()
+
     ensure_dirs()
     state = load_state()
 
@@ -319,6 +365,17 @@ def main():
         if scene_id > prev_scene_id:
             state["processed_captures"].append(capture)
             save_state(state)
+
+    run_full_pipeline = (
+        args.mode == "full"
+        if args.mode is not None
+        else ask_yes_no(
+            "Run the full pipeline after Laplacian? (lap.py -> align2.py -> 256.py)",
+            default=False
+        )
+    )
+
+    run_alignment_pipeline(run_full_pipeline)
 
 if __name__ == "__main__":
     main()

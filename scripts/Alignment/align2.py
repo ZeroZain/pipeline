@@ -1,6 +1,9 @@
 import os
 import cv2
 import csv
+import argparse
+import subprocess
+import sys
 import rawpy
 import numpy as np
 from tqdm import tqdm
@@ -444,5 +447,78 @@ def run_pipeline():
     print("pipeline complete")
 
 
-if __name__ == "__main__":
+def ask_yes_no(prompt, default=False):
+    default_hint = "Y/n" if default else "y/N"
+
+    while True:
+        answer = input(f"{prompt} [{default_hint}]: ").strip().lower()
+
+        if not answer:
+            return default
+
+        if answer in ("y", "yes"):
+            return True
+
+        if answer in ("n", "no"):
+            return False
+
+        print("Please answer with 'y' or 'n'.")
+
+
+def run_interpolation_script():
+    interpolation_script = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "Interpolation", "256.py")
+    )
+
+    print("Alignment stage complete. Starting interpolation...")
+    subprocess.run([sys.executable, interpolation_script], check=True)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Align images and optionally continue to interpolation."
+    )
+    parser.add_argument(
+        "--run-next",
+        action="store_true",
+        help="Run 256.py after alignment completes"
+    )
+    parser.add_argument(
+        "--align-only",
+        action="store_true",
+        help="Run alignment only and stop"
+    )
+    args = parser.parse_args()
+
+    if args.run_next and args.align_only:
+        parser.error("Use either --run-next or --align-only, not both.")
+
+    return args
+
+
+def main():
+    args = parse_args()
+
     run_pipeline()
+
+    if args.run_next:
+        run_interpolation_script()
+        return
+
+    if args.align_only:
+        print("Alignment stage complete. Interpolation was not started.")
+        return
+
+    should_run_next = ask_yes_no(
+        "Run interpolation now? (align2.py -> 256.py)",
+        default=False
+    )
+
+    if should_run_next:
+        run_interpolation_script()
+    else:
+        print("Alignment stage complete. Interpolation was not started.")
+
+
+if __name__ == "__main__":
+    main()

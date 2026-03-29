@@ -1,6 +1,7 @@
 import os
 import cv2
 import csv
+import numpy as np
 from tqdm import tqdm
 
 # CONFIG
@@ -66,80 +67,84 @@ def save_debug_visual(scene, images_dict):
     cv2.imwrite(os.path.join(DEBUG_DIR, f"{scene}.jpg"), vis)
 
 
-# LOG STORAGE
+def run_pipeline():
+    if not os.path.exists(INPUT_DIR):
+        print(f"Input folder not found: {INPUT_DIR}")
+        return
 
-log_rows = []
+    log_rows = []
+    scenes = sorted(os.listdir(INPUT_DIR))
 
-scenes = sorted(os.listdir(INPUT_DIR))
+    for scene in tqdm(scenes, desc="Processing Scenes", unit="scene"):
 
-for scene in tqdm(scenes, desc="Processing Scenes", unit="scene"):
+        scene_path = os.path.join(INPUT_DIR, scene)
 
-    scene_path = os.path.join(INPUT_DIR, scene)
-
-    if not os.path.isdir(scene_path):
-        continue
-
-    output_scene = os.path.join(OUTPUT_DIR, scene)
-    os.makedirs(output_scene, exist_ok=True)
-
-    debug_images = {}
-
-    for img_name in os.listdir(scene_path):
-
-        output_path = os.path.join(output_scene, img_name)
-
-        if os.path.exists(output_path):
-            img = cv2.imread(output_path)
-            if img is not None:
-                key = os.path.splitext(img_name)[0]
-                debug_images[key] = img
+        if not os.path.isdir(scene_path):
             continue
 
-        img_path = os.path.join(scene_path, img_name)
-        img = cv2.imread(img_path)
+        output_scene = os.path.join(OUTPUT_DIR, scene)
+        os.makedirs(output_scene, exist_ok=True)
 
-        if img is None:
-            continue
+        debug_images = {}
 
-        h, w = img.shape[:2]
+        for img_name in os.listdir(scene_path):
 
-        if min(h, w) < TARGET_SIZE:
-            log_rows.append([scene, img_name, w, h, "SKIPPED_SMALL"])
-            continue
+            output_path = os.path.join(output_scene, img_name)
 
-        cropped = center_crop(img)
+            if os.path.exists(output_path):
+                img = cv2.imread(output_path)
+                if img is not None:
+                    key = os.path.splitext(img_name)[0]
+                    debug_images[key] = img
+                continue
 
-        resized = cv2.resize(
-            cropped,
-            (TARGET_SIZE, TARGET_SIZE),
-            interpolation=cv2.INTER_CUBIC
-        )
+            img_path = os.path.join(scene_path, img_name)
+            img = cv2.imread(img_path)
 
-        cv2.imwrite(
-            output_path,
-            resized,
-            [cv2.IMWRITE_JPEG_QUALITY, 95]
-        )
+            if img is None:
+                continue
 
-        key = os.path.splitext(img_name)[0]
-        debug_images[key] = resized
+            h, w = img.shape[:2]
 
-        log_rows.append([scene, img_name, w, h, "SUCCESS"])
+            if min(h, w) < TARGET_SIZE:
+                log_rows.append([scene, img_name, w, h, "SKIPPED_SMALL"])
+                continue
 
-    # SAVE DEBUG IMAGE PER SCENE
-    import numpy as np
-    save_debug_visual(scene, debug_images)
+            cropped = center_crop(img)
+
+            resized = cv2.resize(
+                cropped,
+                (TARGET_SIZE, TARGET_SIZE),
+                interpolation=cv2.INTER_CUBIC
+            )
+
+            cv2.imwrite(
+                output_path,
+                resized,
+                [cv2.IMWRITE_JPEG_QUALITY, 95]
+            )
+
+            key = os.path.splitext(img_name)[0]
+            debug_images[key] = resized
+
+            log_rows.append([scene, img_name, w, h, "SUCCESS"])
+
+        save_debug_visual(scene, debug_images)
+
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
+            writer.writerow(["scene", "image", "original_width", "original_height", "status"])
+        writer.writerows(log_rows)
+
+    print("\nInterpolation stage complete.")
+    print(f"Processed scenes: {len(scenes)}")
+    print(f"Check your output at: {OUTPUT_DIR}")
 
 
-# SAVE LOG
-
-with open(LOG_FILE, "a", newline="") as f:
-    writer = csv.writer(f)
-    if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
-        writer.writerow(["scene", "image", "original_width", "original_height", "status"])
-    writer.writerows(log_rows)
+def main():
+    run_pipeline()
 
 
-print("\nInterpolation stage complete.")
-print(f"Processed scenes: {len(scenes)}")
-print(f"Check your output at: {OUTPUT_DIR}")
+if __name__ == "__main__":
+    main()
