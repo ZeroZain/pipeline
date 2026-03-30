@@ -1,6 +1,7 @@
 import os
 import cv2
 import csv
+import re
 import numpy as np
 from tqdm import tqdm
 
@@ -17,10 +18,45 @@ LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "interpolation_log.csv")
 
 DEBUG_DIR = "debug_interpolation"
+SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DEBUG_DIR, exist_ok=True)
+
+
+def to_posix(path):
+    return path.replace(os.sep, "/")
+
+
+def slugify_path(path):
+    parts = []
+
+    for part in os.path.normpath(path).split(os.sep):
+        clean = re.sub(r"[^A-Za-z0-9._-]+", "_", part).strip("_")
+        parts.append(clean or "item")
+
+    return "__".join(parts)
+
+
+def list_scene_dirs(root):
+    scenes = []
+
+    if not os.path.exists(root):
+        return scenes
+
+    for current_root, dirs, _ in os.walk(root):
+        dirs.sort()
+
+        for name in dirs:
+            if SCENE_PATTERN.match(name):
+                full_path = os.path.join(current_root, name)
+                rel_path = os.path.relpath(full_path, root)
+                scenes.append((rel_path, full_path))
+
+        dirs[:] = [name for name in dirs if not SCENE_PATTERN.match(name)]
+
+    return sorted(scenes, key=lambda item: item[0].lower())
 
 
 # CENTER CROP
@@ -64,7 +100,7 @@ def save_debug_visual(scene, images_dict):
             1
         )
 
-    cv2.imwrite(os.path.join(DEBUG_DIR, f"{scene}.jpg"), vis)
+    cv2.imwrite(os.path.join(DEBUG_DIR, f"{slugify_path(scene)}.jpg"), vis)
 
 
 def run_pipeline():
@@ -73,16 +109,12 @@ def run_pipeline():
         return
 
     log_rows = []
-    scenes = sorted(os.listdir(INPUT_DIR))
+    scenes = list_scene_dirs(INPUT_DIR)
 
-    for scene in tqdm(scenes, desc="Processing Scenes", unit="scene"):
+    for scene_rel, scene_path in tqdm(scenes, desc="Processing Scenes", unit="scene"):
 
-        scene_path = os.path.join(INPUT_DIR, scene)
-
-        if not os.path.isdir(scene_path):
-            continue
-
-        output_scene = os.path.join(OUTPUT_DIR, scene)
+        scene_key = to_posix(scene_rel)
+        output_scene = os.path.join(OUTPUT_DIR, scene_rel)
         os.makedirs(output_scene, exist_ok=True)
 
         debug_images = {}
@@ -107,7 +139,7 @@ def run_pipeline():
             h, w = img.shape[:2]
 
             if min(h, w) < TARGET_SIZE:
-                log_rows.append([scene, img_name, w, h, "SKIPPED_SMALL"])
+                log_rows.append([scene_key, img_name, w, h, "SKIPPED_SMALL"])
                 continue
 
             cropped = center_crop(img)
@@ -127,9 +159,9 @@ def run_pipeline():
             key = os.path.splitext(img_name)[0]
             debug_images[key] = resized
 
-            log_rows.append([scene, img_name, w, h, "SUCCESS"])
+            log_rows.append([scene_key, img_name, w, h, "SUCCESS"])
 
-        save_debug_visual(scene, debug_images)
+        save_debug_visual(scene_rel, debug_images)
 
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)

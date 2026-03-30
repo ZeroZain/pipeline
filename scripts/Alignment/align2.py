@@ -4,6 +4,7 @@ import csv
 import argparse
 import subprocess
 import sys
+import re
 import rawpy
 import numpy as np
 from tqdm import tqdm
@@ -25,6 +26,7 @@ SSIM_THRESHOLD_BLUR = 0.45
 
 ECC_MAX_ITERS = 100
 ECC_EPS = 1e-6
+SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 # IO
 
@@ -47,6 +49,40 @@ def read_image(path):
 
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
+
+
+def to_posix(path):
+    return path.replace(os.sep, "/")
+
+
+def slugify_path(path):
+    parts = []
+
+    for part in os.path.normpath(path).split(os.sep):
+        clean = re.sub(r"[^A-Za-z0-9._-]+", "_", part).strip("_")
+        parts.append(clean or "item")
+
+    return "__".join(parts)
+
+
+def list_scene_dirs(root):
+    scenes = []
+
+    if not os.path.exists(root):
+        return scenes
+
+    for current_root, dirs, _ in os.walk(root):
+        dirs.sort()
+
+        for name in dirs:
+            if SCENE_PATTERN.match(name):
+                full_path = os.path.join(current_root, name)
+                rel_path = os.path.relpath(full_path, root)
+                scenes.append((rel_path, full_path))
+
+        dirs[:] = [name for name in dirs if not SCENE_PATTERN.match(name)]
+
+    return sorted(scenes, key=lambda item: item[0].lower())
 
 
 def open_log(path, header):
@@ -246,7 +282,7 @@ def save_alignment_visual(scene,
             cv2.putText(vis, line, (i*w + 10, h + 25 + j*20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
 
-    cv2.imwrite(os.path.join(DEBUG_ALIGN_DIR, f"{scene}.jpg"), vis)
+    cv2.imwrite(os.path.join(DEBUG_ALIGN_DIR, f"{slugify_path(scene)}.jpg"), vis)
 
 
 # MAIN
@@ -261,15 +297,12 @@ def run_pipeline():
     output_root = os.path.join(OUTPUT_ROOT, f"gt_{GT_SOURCE}", "color")
     ensure_dir(output_root)
 
-    scenes = sorted([
-        s for s in os.listdir(DATASET_ROOT)
-        if os.path.isdir(os.path.join(DATASET_ROOT, s))
-    ])
+    scenes = list_scene_dirs(DATASET_ROOT)
 
-    for scene in tqdm(scenes):
+    for scene_rel, scene_path in tqdm(scenes):
 
-        scene_path = os.path.join(DATASET_ROOT, scene)
-        scene_output_dir = os.path.join(output_root, scene)
+        scene_key = to_posix(scene_rel)
+        scene_output_dir = os.path.join(output_root, scene_rel)
         ensure_dir(scene_output_dir)
 
         gt = read_image(os.path.join(scene_path, "ois_sharp.dng"))
@@ -357,7 +390,7 @@ def run_pipeline():
             geo_ok = mean_flow < FLOW_THRESHOLD
 
             geo_writer.writerow([
-                scene,
+                scene_key,
                 file,
                 ratio,
                 mean_flow,
@@ -371,7 +404,7 @@ def run_pipeline():
             mean_after = abs(np.mean(gt) - np.mean(photo_img))
             photo_ok = mean_after < mean_before
 
-            photo_writer.writerow([scene, file, mean_before, mean_after, photo_ok])
+            photo_writer.writerow([scene_key, file, mean_before, mean_after, photo_ok])
 
             dE_before = deltaE(gt, photo_img)
 
@@ -394,7 +427,7 @@ def run_pipeline():
                 scene_failed.append(file)
 
             color_writer.writerow([
-                scene, file,
+                scene_key, file,
                 dE_before, dE_after,
                 ssim_val, dE_after_candidate < dE_before, overall_pass
             ])
@@ -426,7 +459,7 @@ def run_pipeline():
         )
 
         save_alignment_visual(
-            scene,
+            scene_rel,
             gt,
             ois_blur_raw,
             nonois_sharp_raw,
@@ -439,7 +472,7 @@ def run_pipeline():
 
         if scene_failed:
             scene_fail_writer.writerow([
-                scene,
+                scene_key,
                 ";".join(scene_failed),
                 len(scene_failed)
             ])

@@ -8,7 +8,8 @@ aligned/
 decoded_frames/
 logs/
 debug_vis/
-debug_alignments/
+debug_alignment/
+debug_interpolation/
 
 # Ignore Python cache files
 __pycache__/

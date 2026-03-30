@@ -6,6 +6,7 @@ import shutil
 import argparse
 import subprocess
 import sys
+import re
 import numpy as np
 import rawpy
 from tqdm import tqdm
@@ -34,6 +35,7 @@ STABLE_CHECK = 3 # After detecting a potential transition, check the next STABLE
 
 DEBUG_MODE = True
 DEBUG_OUTPUT = "debug_vis"
+SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 # ================= SETUP =================
 
@@ -44,13 +46,75 @@ def ensure_dirs():
     if DEBUG_MODE:
         os.makedirs(DEBUG_OUTPUT, exist_ok=True)
 
+
+def to_posix(path):
+    return path.replace(os.sep, "/")
+
+
+def slugify_path(path):
+    parts = []
+
+    for part in os.path.normpath(path).split(os.sep):
+        clean = re.sub(r"[^A-Za-z0-9._-]+", "_", part).strip("_")
+        parts.append(clean or "item")
+
+    return "__".join(parts)
+
+
+def list_captures(root):
+    captures = []
+
+    if not os.path.exists(root):
+        return captures
+
+    for current_root, dirs, _ in os.walk(root):
+        dirs.sort()
+
+        for name in dirs:
+            if name.startswith("capture_"):
+                full_path = os.path.join(current_root, name)
+                rel_path = os.path.relpath(full_path, root)
+                captures.append(rel_path)
+
+        dirs[:] = [name for name in dirs if not name.startswith("capture_")]
+
+    return sorted(captures, key=lambda path: path.lower())
+
+
+def next_scene_id_from_dataset():
+    max_scene_id = 0
+
+    if not os.path.exists(DATASET_ROOT):
+        return 1
+
+    for _, dirs, _ in os.walk(DATASET_ROOT):
+        for name in dirs:
+            match = SCENE_PATTERN.match(name)
+            if match:
+                max_scene_id = max(max_scene_id, int(match.group(1)))
+
+    return max_scene_id + 1
+
+
+def capture_categories(capture_rel_path):
+    return os.path.normpath(capture_rel_path).split(os.sep)[:-1]
+
 # ================= STATE =================
 
 def load_state():
+    discovered_next_scene_id = next_scene_id_from_dataset()
+
     if not os.path.exists(STATE_FILE):
-        return {"processed_captures": []}
+        return {
+            "processed_captures": [],
+            "next_scene_id": discovered_next_scene_id
+        }
     with open(STATE_FILE, "r") as f:
-        return json.load(f)
+        state = json.load(f)
+
+    state.setdefault("processed_captures", [])
+    state["next_scene_id"] = max(state.get("next_scene_id", 1), discovered_next_scene_id)
+    return state
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
@@ -177,7 +241,9 @@ def build_scene(scene_id, capture_name,
                 ois_dir, nonois_dir):
 
     scene_name = f"scene_{scene_id:03d}"
-    scene_path = os.path.join(DATASET_ROOT, scene_name)
+    category_parts = capture_categories(capture_name)
+    scene_rel_path = os.path.join(*category_parts, scene_name) if category_parts else scene_name
+    scene_path = os.path.join(DATASET_ROOT, scene_rel_path)
     os.makedirs(scene_path, exist_ok=True)
 
     for src_dir, filename, label in [
@@ -192,9 +258,13 @@ def build_scene(scene_id, capture_name,
 
     append_csv(
         SCENE_LOG,
-        ["scene", "capture", "ois_sharp", "ois_blur",
+        ["scene", "split", "method", "capture", "ois_sharp", "ois_blur",
          "nonois_sharp", "nonois_blur"],
-        [scene_name, capture_name,
+        [
+         to_posix(scene_rel_path),
+         category_parts[0] if len(category_parts) > 0 else "",
+         category_parts[1] if len(category_parts) > 1 else "",
+         to_posix(capture_name),
          ois_sharp, ois_blur,
          nonois_sharp, nonois_blur]
     )
@@ -206,9 +276,10 @@ def process_capture(capture_name, scene_id):
     capture_path = os.path.join(DECODED_ROOT, capture_name)
     ois_dir = os.path.join(capture_path, "ois")
     nonois_dir = os.path.join(capture_path, "nonois")
+    capture_key = slugify_path(capture_name)
 
-    ois_results = score_frames(ois_dir, capture_name, "ois")
-    nonois_results = score_frames(nonois_dir, capture_name, "nonois")
+    ois_results = score_frames(ois_dir, capture_key, "ois")
+    nonois_results = score_frames(nonois_dir, capture_key, "nonois")
 
     if not ois_results or not nonois_results:
         return scene_id
@@ -346,16 +417,13 @@ def main():
     ensure_dirs()
     state = load_state()
 
-    captures = sorted([
-        d for d in os.listdir(DECODED_ROOT)
-        if os.path.isdir(os.path.join(DECODED_ROOT, d))
-    ])
-
-    scene_id = 1
+    captures = list_captures(DECODED_ROOT)
+    processed_captures = set(state["processed_captures"])
+    scene_id = state["next_scene_id"]
 
     for capture in tqdm(captures, desc="Processing"):
 
-        if capture in state["processed_captures"]:
+        if capture in processed_captures:
             tqdm.write(f"Skipping (already processed): {capture}")
             continue
 
@@ -364,7 +432,10 @@ def main():
 
         if scene_id > prev_scene_id:
             state["processed_captures"].append(capture)
-            save_state(state)
+            processed_captures.add(capture)
+
+        state["next_scene_id"] = scene_id
+        save_state(state)
 
     run_full_pipeline = (
         args.mode == "full"

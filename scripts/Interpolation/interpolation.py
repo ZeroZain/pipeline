@@ -1,6 +1,7 @@
 import os
 import cv2
 import csv
+import re
 from tqdm import tqdm  # Standard for progress tracking
 
 # Configuration
@@ -13,9 +14,34 @@ TARGET_SIZE = 256
 
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "interpolation_log.csv")
+SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def to_posix(path):
+    return path.replace(os.sep, "/")
+
+
+def list_scene_dirs(root):
+    scenes = []
+
+    if not os.path.exists(root):
+        return scenes
+
+    for current_root, dirs, _ in os.walk(root):
+        dirs.sort()
+
+        for name in dirs:
+            if SCENE_PATTERN.match(name):
+                full_path = os.path.join(current_root, name)
+                rel_path = os.path.relpath(full_path, root)
+                scenes.append((rel_path, full_path))
+
+        dirs[:] = [name for name in dirs if not SCENE_PATTERN.match(name)]
+
+    return sorted(scenes, key=lambda item: item[0].lower())
 
 # Center crop function
 def center_crop(img):
@@ -37,16 +63,12 @@ def center_crop(img):
 log_rows = []
 
 # Process scenes
-scenes = sorted(os.listdir(INPUT_DIR))
+scenes = list_scene_dirs(INPUT_DIR)
 
 # Wrap scenes in tqdm for the visual progress bar
-for scene in tqdm(scenes, desc="Processing Scenes", unit="scene"):
-    scene_path = os.path.join(INPUT_DIR, scene)
-
-    if not os.path.isdir(scene_path):
-        continue
-
-    output_scene = os.path.join(OUTPUT_DIR, scene)
+for scene_rel, scene_path in tqdm(scenes, desc="Processing Scenes", unit="scene"):
+    scene_key = to_posix(scene_rel)
+    output_scene = os.path.join(OUTPUT_DIR, scene_rel)
     os.makedirs(output_scene, exist_ok=True)
 
     for img_name in os.listdir(scene_path):
@@ -67,7 +89,7 @@ for scene in tqdm(scenes, desc="Processing Scenes", unit="scene"):
 
         # Skip images smaller than the target resolution
         if min(h, w) < TARGET_SIZE:
-            log_rows.append([scene, img_name, w, h, "SKIPPED_SMALL"])
+            log_rows.append([scene_key, img_name, w, h, "SKIPPED_SMALL"])
             continue
 
         # Center crop to remove black artifacts and make square
@@ -87,7 +109,7 @@ for scene in tqdm(scenes, desc="Processing Scenes", unit="scene"):
             [cv2.IMWRITE_JPEG_QUALITY, 95]
         )
 
-        log_rows.append([scene, img_name, w, h, "SUCCESS"])
+        log_rows.append([scene_key, img_name, w, h, "SUCCESS"])
 
 # Save/Update interpolation log
 # Note: This will overwrite the log file with ONLY the newly processed files.
