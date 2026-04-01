@@ -1,5 +1,6 @@
 # Ignore the virtual environment
 venv/
+.venv/
 
 # Ignore local datasets and logs (they are usually too large for GitHub)
 dataset/
@@ -8,7 +9,8 @@ aligned/
 decoded_frames/
 logs/
 debug_vis/
-debug_alignments/
+debug_alignment/
+debug_interpolation/
 
 # Ignore Python cache files
 __pycache__/

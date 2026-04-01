@@ -6,6 +6,7 @@ import shutil
 import argparse
 import subprocess
 import sys
+import re
 import numpy as np
 import rawpy
 from tqdm import tqdm
@@ -22,18 +23,18 @@ STATE_FILE = os.path.join(DATASET_ROOT, "dataset_state.json")
 
 MAX_SCENES_PER_VIDEO = 1 
 BLUR_PERCENTILE = 30 # When determining the sharpness threshold for a video, use this percentile of the OIS sharpness scores. Adjust based on your data. 30 means using the 30th percentile, 20 means using the 20th percentile (more aggressive), 40 means using the 40th percentile (more conservative), etc.
-SEARCH_WINDOW = 5 # When matching sharp and blurry frames between OIS and non-OIS, only search within this window size around the detected indices. Adjust based on how closely the two cameras are synchronized. 5 means searching 5 frames before and after, 10 means searching 10 frames before and after, etc.
 
 # controls transition detection and frame pick ranges
 SHARP_WINDOW = 10
 BLUR_WINDOW = 4
-BLUR_TO_SHARP_MAX_RATIO = 0.7 # A blur frame must have a sharpness score no more than this ratio of its paired sharp frame to be considered valid. Adjust based on your data. 0.7 means the blur frame can be at most 70% as sharp as the sharp frame, 0.5 means it can be at most 50% as sharp, etc.
+BLUR_TO_SHARP_MAX_RATIO = 0.8 # A blur frame must have a sharpness score no more than this ratio of its paired sharp frame to be considered valid. Adjust based on your data. 0.7 means the blur frame can be at most 70% as sharp as the sharp frame, 0.5 means it can be at most 50% as sharp, etc.
 
 DROP_RATIO = 1.1 # A frame is considered a transition if the sharpness drops by at least this factor compared to the previous frame. Adjust based on your data. 1.1 means a 10% drop, 1.2 means a 20% drop, etc.
-STABLE_CHECK = 3 # After detecting a potential transition, check the next STABLE_CHECK frames to ensure they remain blurry (i.e., their sharpness does not rise back above the threshold). Adjust based on how long you expect the blur to last. 3 means checking the next 3 frames, 5 means checking the next 5 frames, etc.
+STABLE_CHECK = 10 # After detecting a potential transition, check the next STABLE_CHECK frames to ensure they remain blurry (i.e., their sharpness does not rise back above the threshold). Adjust based on how long you expect the blur to last. 3 means checking the next 3 frames, 5 means checking the next 5 frames, etc.
 
 DEBUG_MODE = True
 DEBUG_OUTPUT = "debug_vis"
+SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 # ================= SETUP =================
 
@@ -44,13 +45,75 @@ def ensure_dirs():
     if DEBUG_MODE:
         os.makedirs(DEBUG_OUTPUT, exist_ok=True)
 
+
+def to_posix(path):
+    return path.replace(os.sep, "/")
+
+
+def slugify_path(path):
+    parts = []
+
+    for part in os.path.normpath(path).split(os.sep):
+        clean = re.sub(r"[^A-Za-z0-9._-]+", "_", part).strip("_")
+        parts.append(clean or "item")
+
+    return "__".join(parts)
+
+
+def list_captures(root):
+    captures = []
+
+    if not os.path.exists(root):
+        return captures
+
+    for current_root, dirs, _ in os.walk(root):
+        dirs.sort()
+
+        for name in dirs:
+            if name.startswith("capture_"):
+                full_path = os.path.join(current_root, name)
+                rel_path = os.path.relpath(full_path, root)
+                captures.append(rel_path)
+
+        dirs[:] = [name for name in dirs if not name.startswith("capture_")]
+
+    return sorted(captures, key=lambda path: path.lower())
+
+
+def next_scene_id_from_dataset():
+    max_scene_id = 0
+
+    if not os.path.exists(DATASET_ROOT):
+        return 1
+
+    for _, dirs, _ in os.walk(DATASET_ROOT):
+        for name in dirs:
+            match = SCENE_PATTERN.match(name)
+            if match:
+                max_scene_id = max(max_scene_id, int(match.group(1)))
+
+    return max_scene_id + 1
+
+
+def capture_categories(capture_rel_path):
+    return os.path.normpath(capture_rel_path).split(os.sep)[:-1]
+
 # ================= STATE =================
 
 def load_state():
+    discovered_next_scene_id = next_scene_id_from_dataset()
+
     if not os.path.exists(STATE_FILE):
-        return {"processed_captures": []}
+        return {
+            "processed_captures": [],
+            "next_scene_id": discovered_next_scene_id
+        }
     with open(STATE_FILE, "r") as f:
-        return json.load(f)
+        state = json.load(f)
+
+    state.setdefault("processed_captures", [])
+    state["next_scene_id"] = max(state.get("next_scene_id", 1), discovered_next_scene_id)
+    return state
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
@@ -177,7 +240,9 @@ def build_scene(scene_id, capture_name,
                 ois_dir, nonois_dir):
 
     scene_name = f"scene_{scene_id:03d}"
-    scene_path = os.path.join(DATASET_ROOT, scene_name)
+    category_parts = capture_categories(capture_name)
+    scene_rel_path = os.path.join(*category_parts, scene_name) if category_parts else scene_name
+    scene_path = os.path.join(DATASET_ROOT, scene_rel_path)
     os.makedirs(scene_path, exist_ok=True)
 
     for src_dir, filename, label in [
@@ -192,9 +257,13 @@ def build_scene(scene_id, capture_name,
 
     append_csv(
         SCENE_LOG,
-        ["scene", "capture", "ois_sharp", "ois_blur",
+        ["scene", "split", "method", "capture", "ois_sharp", "ois_blur",
          "nonois_sharp", "nonois_blur"],
-        [scene_name, capture_name,
+        [
+         to_posix(scene_rel_path),
+         category_parts[0] if len(category_parts) > 0 else "",
+         category_parts[1] if len(category_parts) > 1 else "",
+         to_posix(capture_name),
          ois_sharp, ois_blur,
          nonois_sharp, nonois_blur]
     )
@@ -206,9 +275,10 @@ def process_capture(capture_name, scene_id):
     capture_path = os.path.join(DECODED_ROOT, capture_name)
     ois_dir = os.path.join(capture_path, "ois")
     nonois_dir = os.path.join(capture_path, "nonois")
+    capture_key = slugify_path(capture_name)
 
-    ois_results = score_frames(ois_dir, capture_name, "ois")
-    nonois_results = score_frames(nonois_dir, capture_name, "nonois")
+    ois_results = score_frames(ois_dir, capture_key, "ois")
+    nonois_results = score_frames(nonois_dir, capture_key, "nonois")
 
     if not ois_results or not nonois_results:
         return scene_id
@@ -217,8 +287,10 @@ def process_capture(capture_name, scene_id):
     nonois_values = [s for _, s in nonois_results]
 
     threshold_ois = np.percentile(ois_values, BLUR_PERCENTILE)
+    threshold_nonois = np.percentile(nonois_values, BLUR_PERCENTILE)
 
     transitions = find_transitions(ois_values)
+    nonois_transitions = find_transitions(nonois_values)
 
     scene_count = 0
 
@@ -251,19 +323,32 @@ def process_capture(capture_name, scene_id):
         if ois_values[blur_idx] > (ois_values[sharp_idx] * BLUR_TO_SHARP_MAX_RATIO):
             continue
 
-        # non-OIS matching
-        sharp_idx_nonois = min(range(len(nonois_values)), key=lambda x: abs(x - sharp_idx))
-        blur_idx_nonois = min(range(len(nonois_values)), key=lambda x: abs(x - blur_idx))
+        # non-OIS matching: use independent transition detection (same approach as OIS)
+        if not nonois_transitions:
+            continue
 
-        s_start = max(0, sharp_idx_nonois - SEARCH_WINDOW)
-        s_end = min(len(nonois_values), sharp_idx_nonois + SEARCH_WINDOW)
+        nonois_t = min(nonois_transitions, key=lambda x: abs(x - t))
 
-        sharp_idx_nonois = max(range(s_start, s_end), key=lambda x: nonois_values[x])
+        sharp_start_nonois = max(0, nonois_t - SHARP_WINDOW)
+        sharp_end_nonois = nonois_t
 
-        b_start = max(0, blur_idx_nonois - SEARCH_WINDOW)
-        b_end = min(len(nonois_values), blur_idx_nonois + SEARCH_WINDOW)
+        blur_start_nonois = nonois_t
+        blur_end_nonois = min(len(nonois_values), nonois_t + BLUR_WINDOW)
 
-        blur_idx_nonois = min(range(b_start, b_end), key=lambda x: nonois_values[x])
+        sharp_seg_nonois = list(range(sharp_start_nonois, sharp_end_nonois))
+        blur_seg_nonois = list(range(blur_start_nonois, blur_end_nonois))
+
+        if len(sharp_seg_nonois) < 5 or len(blur_seg_nonois) == 0:
+            continue
+
+        sharp_idx_nonois = max(sharp_seg_nonois, key=lambda x: nonois_values[x])
+        blur_idx_nonois = min(blur_seg_nonois, key=lambda x: nonois_values[x])
+
+        if nonois_values[sharp_idx_nonois] <= threshold_nonois:
+            continue
+
+        if nonois_values[blur_idx_nonois] > (nonois_values[sharp_idx_nonois] * BLUR_TO_SHARP_MAX_RATIO):
+            continue
 
         sharp_file = ois_results[sharp_idx][0]
         blur_file = ois_results[blur_idx][0]
@@ -346,16 +431,13 @@ def main():
     ensure_dirs()
     state = load_state()
 
-    captures = sorted([
-        d for d in os.listdir(DECODED_ROOT)
-        if os.path.isdir(os.path.join(DECODED_ROOT, d))
-    ])
-
-    scene_id = 1
+    captures = list_captures(DECODED_ROOT)
+    processed_captures = set(state["processed_captures"])
+    scene_id = state["next_scene_id"]
 
     for capture in tqdm(captures, desc="Processing"):
 
-        if capture in state["processed_captures"]:
+        if capture in processed_captures:
             tqdm.write(f"Skipping (already processed): {capture}")
             continue
 
@@ -364,7 +446,10 @@ def main():
 
         if scene_id > prev_scene_id:
             state["processed_captures"].append(capture)
-            save_state(state)
+            processed_captures.add(capture)
+
+        state["next_scene_id"] = scene_id
+        save_state(state)
 
     run_full_pipeline = (
         args.mode == "full"
