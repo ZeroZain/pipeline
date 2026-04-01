@@ -206,6 +206,9 @@ def find_transitions(values, blur_ratio=BLUR_TO_SHARP_MAX_RATIO, immediate_max_o
 
         blur_limit = sharp_ref * blur_ratio
         immediate_blur = values[i:i + BLUR_WINDOW]
+        # A spike on the first blur frame means the drop has not truly started yet.
+        if immediate_blur and immediate_blur[0] > blur_limit:
+            continue
         immediate_outliers = sum(v > blur_limit for v in immediate_blur)
         if immediate_outliers > immediate_max_outliers:
             continue
@@ -396,6 +399,7 @@ def build_scene(scene_id, capture_name,
                 ois_sharp, ois_blur,
                 nonois_sharp, nonois_blur,
                 ois_drop_frame, nonois_drop_frame,
+                ois_drop_frame_actual, nonois_drop_frame_actual,
                 nonois_used_fallback,
                 is_linear_scene,
                 ois_dir, nonois_dir):
@@ -419,7 +423,9 @@ def build_scene(scene_id, capture_name,
     append_csv(
         SCENE_LOG,
         ["scene", "split", "method", "capture", "ois_sharp", "ois_blur",
-            "nonois_sharp", "nonois_blur", "ois_drop_frame", "nonois_drop_frame", "nonois_used_fallback", "is_linear_scene"],
+            "nonois_sharp", "nonois_blur", "ois_drop_frame", "nonois_drop_frame",
+            "ois_drop_frame_actual", "nonois_drop_frame_actual",
+            "nonois_used_fallback", "is_linear_scene"],
         [
          to_posix(scene_rel_path),
          category_parts[0] if len(category_parts) > 0 else "",
@@ -427,7 +433,9 @@ def build_scene(scene_id, capture_name,
          to_posix(capture_name),
          ois_sharp, ois_blur,
             nonois_sharp, nonois_blur,
-                ois_drop_frame, nonois_drop_frame, "true" if nonois_used_fallback else "false", "true" if is_linear_scene else "false"]
+                ois_drop_frame, nonois_drop_frame,
+                ois_drop_frame_actual, nonois_drop_frame_actual,
+                "true" if nonois_used_fallback else "false", "true" if is_linear_scene else "false"]
     )
 
 # ================= PROCESS =================
@@ -461,6 +469,7 @@ def process_capture(capture_name, scene_id):
         NONOIS_TRANSITION_RATIO,
         NONOIS_IMMEDIATE_MAX_OUTLIERS
     )
+    nonois_actual_t = nonois_transitions[0] if nonois_transitions else None
 
     scene_count = 0
 
@@ -574,6 +583,8 @@ def process_capture(capture_name, scene_id):
             nonois_blur_file,
             ois_results[t][0],
             nonois_results[nonois_t][0],
+            ois_results[t][0],
+            nonois_results[nonois_actual_t][0] if nonois_actual_t is not None else "",
             used_nonois_fallback,
             is_linear_scene,
             ois_dir,
