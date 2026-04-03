@@ -6,7 +6,7 @@ CaptureSync is a Python script that organizes raw video frame folders from two s
 
 The script:
 
-* Matches folders based on timestamp
+* Matches folders based on timestamp (with time tolerance)
 * Groups them into `capture_xxx`
 * Classifies them into:
 
@@ -34,6 +34,10 @@ workspace/
       └── logs/
 ```
 
+Note:
+
+* Files are moved directly from `incoming/` to Google Drive
+* `failed/` stores unmatched or invalid folders
 
 ---
 
@@ -58,7 +62,42 @@ YYMMDD_HHMMSS_VIDEO_XXmm
 
 * `25mm` corresponds to nonois
 * `26mm` corresponds to ois
-* The timestamp must match between both folders
+* Exact timestamp match is NOT required (see pairing logic below)
+
+---
+
+## Pairing Logic (Important)
+
+The script uses **time-tolerant matching** instead of exact matching.
+
+### How it works:
+
+* Converts folder timestamps into datetime
+* Matches OIS and Non-OIS folders based on **closest time**
+* Accepts matches within:
+
+```text
+±2 seconds tolerance
+```
+
+### Example:
+
+```text
+OIS     → 260403_201606
+NONOIS  → 260403_201607
+```
+
+Difference = 1 second → Valid pair
+
+---
+
+### Unmatched Cases
+
+Folders are moved to `failed/` if:
+
+* No match found within tolerance
+* Invalid naming format
+* Duplicate timestamps
 
 ---
 
@@ -152,11 +191,6 @@ Vibration Method/
     └── nonois/
 ```
 
-Notes:
-
-* Each scene uses 2 devices (OIS and Non-OIS)
-* Each scene is repeated across 3 methods
-
 ---
 
 ### 2. Validate Raw Files
@@ -169,53 +203,20 @@ Notes:
 
 ### 3. Manual Export (MotionCam Pro)
 
-For each video:
-
-* Set render folder:
-
-  ```text
-  exports/{Method}/{capture_xxx}/
-  ```
-
-* Export settings:
-
-  * Format: DNG
-  * Turn OFF: bake in vignette
-  * Turn ON: delete after render
-  * Ensure ZIP compression is enabled
-
 * Export each video manually
-
-Notes:
-
-* Manual pairing required due to filename differences
+* Match OIS and Non-OIS manually
+* Save into correct capture folders
 
 ---
 
 ### 4. Upload via FolderSync
 
-**OIS device:**
-
-1. HandShake Method
-2. Sliding Method
-3. Vibration Method
-
-**Non-OIS device:**
-
-1. Vibration Method
-2. HandShake Method
-3. Sliding Method
-
-Important:
-
-* Do NOT sync both devices at the same time
-* Prevents duplicate folders in Google Drive
+* Sync folders from both devices
+* Do not sync simultaneously to avoid duplication
 
 ---
 
 ## Automated Workflow (CaptureSync)
-
-This is the improved workflow using the script.
 
 ### 1. Add Input Data
 
@@ -228,16 +229,8 @@ encoded_frames/incoming/nonois/
 
 ### 2. Activate Virtual Environment
 
-**Windows (PowerShell):**
-
 ```bash
 .venv\Scripts\Activate
-```
-
-**Windows (Command Prompt):**
-
-```bash
-.venv\Scripts\activate.bat
 ```
 
 ---
@@ -269,11 +262,11 @@ Mapped to:
 The script will:
 
 * Validate folder names
-* Match OIS and Non-OIS pairs
+* Match pairs using time tolerance
 * Assign method (handshake → sliding → vibration)
 * Create `capture_xxx` folders
 * Move folders into Google Drive structure
-* Sync automatically via Google Drive
+* Sync automatically
 
 ---
 
@@ -300,8 +293,8 @@ capture_xxx/
 ## Important Behavior
 
 * Files are **moved**, not copied
-* After processing, `incoming/` will be empty
-* Files remain inside Google Drive folders
+* `incoming/` becomes empty after processing
+* Files remain in Google Drive folders
 
 ---
 
@@ -310,7 +303,7 @@ capture_xxx/
 The script handles:
 
 * Invalid folder names → `failed/`
-* Missing pairs → `failed/`
+* No match within tolerance → `failed/`
 * Duplicate timestamps → `failed/`
 
 ---
@@ -323,9 +316,9 @@ logs/run_YYYYMMDD_HHMMSS.txt
 
 Contains:
 
-* processed captures
+* matched pairs
 * skipped entries
-* error details
+* errors
 
 ---
 
@@ -336,10 +329,10 @@ Training Set/
   HandShake Method/
     capture_010/
       ├── ois/
-      │    └── 260401_111211_VIDEO_25mm/
+      │    └── 260403_201606_VIDEO_26mm/
       │         └── file.zip
       └── nonois/
-           └── 260401_111211_VIDEO_26mm/
+           └── 260403_201607_VIDEO_25mm/
                 └── file.zip
 ```
 
@@ -349,22 +342,20 @@ Training Set/
 
 * Verify folder names before running
 * Do not modify output folders manually
-* Check `failed/` after each run
+* Check `failed/` regularly
 * Ensure Google Drive is syncing
 
 ---
 
 ## Troubleshooting
 
+### Too many files in `failed/`
+
+* Increase tolerance (e.g., 3 seconds)
+
 ### Empty folders in Google Drive
 
-* Ensure files are not being moved after creation
-* Check local folders before sync
-
-### No folders processed
-
-* Check naming format
-* Ensure both `ois` and `nonois` folders contain data
+* Ensure files are not moved after creation
 
 ### Files not syncing
 
@@ -375,5 +366,4 @@ Training Set/
 
 ## Notes
 
-This pipeline reduces manual workload by automating dataset organization and ensuring consistent structure.
-It follows a local-first approach where Google Drive handles synchronization automatically.
+This pipeline improves reliability by using time-tolerant pairing, reducing manual matching errors and handling real-world capture delays between devices.

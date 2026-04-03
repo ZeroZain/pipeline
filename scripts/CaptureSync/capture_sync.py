@@ -7,10 +7,8 @@ from datetime import datetime
 # PATH CONFIG
 # =========================
 
-# Google Drive synced folder
 DRIVE_BASE = r"G:\My Drive\Thesis or Crisis\Videos\Dataset Capture"
 
-# Local pipeline paths
 BASE_PATH = os.path.join(
     os.path.expanduser("~"),
     "Documents",
@@ -69,6 +67,10 @@ def extract_key(name):
     match = pattern.match(name)
     return match.group(1) if match else None
 
+def parse_datetime(key):
+    """Convert timestamp string to datetime object."""
+    return datetime.strptime(key, "%y%m%d_%H%M%S")
+
 def safe_move(src, dst):
     """Move file/folder safely without overwriting."""
     if not os.path.exists(src):
@@ -78,7 +80,7 @@ def safe_move(src, dst):
     shutil.move(src, dst)
 
 def move_failed(path, reason):
-    """Move invalid or problematic folder to failed directory."""
+    """Move invalid or unmatched folder to failed directory."""
     if not os.path.exists(path):
         return
     dest = os.path.join(FAILED, os.path.basename(path))
@@ -114,33 +116,57 @@ def load_folder_map(path):
 
     return data, duplicates
 
-# Load data
+# =========================
+# MATCH WITH TOLERANCE
+# =========================
+def match_with_tolerance(ois_map, nonois_map, tolerance_sec=2):
+    """Match OIS and NONOIS folders within time tolerance."""
+    ois_items = sorted([(k, parse_datetime(k)) for k in ois_map.keys()], key=lambda x: x[1])
+    nonois_items = sorted([(k, parse_datetime(k)) for k in nonois_map.keys()], key=lambda x: x[1])
+
+    matched = []
+    used_nonois = set()
+
+    for ois_key, ois_time in ois_items:
+        best_match = None
+        best_diff = None
+
+        for nonois_key, nonois_time in nonois_items:
+            if nonois_key in used_nonois:
+                continue
+
+            diff = abs((ois_time - nonois_time).total_seconds())
+
+            if diff <= tolerance_sec:
+                if best_diff is None or diff < best_diff:
+                    best_match = nonois_key
+                    best_diff = diff
+
+        if best_match:
+            matched.append((ois_key, best_match))
+            used_nonois.add(best_match)
+            log(f"Matched {ois_key} ↔ {best_match} (Δ={best_diff}s)")
+        else:
+            move_failed(os.path.join(OIS_PATH, ois_map[ois_key]), "no_close_match")
+
+    # Remaining nonois unmatched
+    for nonois_key in nonois_map:
+        if nonois_key not in used_nonois:
+            move_failed(os.path.join(NONOIS_PATH, nonois_map[nonois_key]), "no_close_match")
+
+    return matched
+
+# =========================
+# LOAD DATA
+# =========================
 ois_map, dup1 = load_folder_map(OIS_PATH)
 nonois_map, dup2 = load_folder_map(NONOIS_PATH)
-duplicates = dup1.union(dup2)
 
 # =========================
-# MATCH
+# MATCH PAIRS
 # =========================
-all_keys = sorted(set(ois_map) | set(nonois_map))
-valid_pairs = []
-
-for key in all_keys:
-    if key in duplicates:
-        log(f"Skipped duplicate: {key}")
-        continue
-
-    if key not in ois_map or key not in nonois_map:
-        missing_path = os.path.join(
-            OIS_PATH if key in ois_map else NONOIS_PATH,
-            ois_map.get(key, nonois_map.get(key))
-        )
-        move_failed(missing_path, "missing_pair")
-        continue
-
-    valid_pairs.append(key)
-
-log(f"Valid pairs: {len(valid_pairs)}")
+matched_pairs = match_with_tolerance(ois_map, nonois_map, tolerance_sec=2)
+log(f"Valid pairs: {len(matched_pairs)}")
 
 # =========================
 # USER INPUT
@@ -171,14 +197,13 @@ def next_index(path):
 # =========================
 capture_counters = {}
 
-for i, key in enumerate(valid_pairs):
+for i, (ois_key, nonois_key) in enumerate(matched_pairs):
     method = methods[i % 3]
     drive_method_folder = METHOD_MAP[method]
 
     method_path = os.path.join(DRIVE_BASE, drive_dataset_folder, drive_method_folder)
     os.makedirs(method_path, exist_ok=True)
 
-    # Initialize counter once per method path
     if method_path not in capture_counters:
         capture_counters[method_path] = next_index(method_path)
 
@@ -194,12 +219,11 @@ for i, key in enumerate(valid_pairs):
     os.makedirs(ois_dest, exist_ok=True)
     os.makedirs(nonois_dest, exist_ok=True)
 
-    ois_src = os.path.join(OIS_PATH, ois_map[key])
-    nonois_src = os.path.join(NONOIS_PATH, nonois_map[key])
+    ois_src = os.path.join(OIS_PATH, ois_map[ois_key])
+    nonois_src = os.path.join(NONOIS_PATH, nonois_map[nonois_key])
 
-    # Move folders into capture structure
-    shutil.move(ois_src, os.path.join(ois_dest, ois_map[key]))
-    shutil.move(nonois_src, os.path.join(nonois_dest, nonois_map[key]))
+    shutil.move(ois_src, os.path.join(ois_dest, ois_map[ois_key]))
+    shutil.move(nonois_src, os.path.join(nonois_dest, nonois_map[nonois_key]))
 
     log(f"Created {capture} ({drive_method_folder})")
 
