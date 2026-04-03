@@ -7,17 +7,23 @@ from tqdm import tqdm
 
 # CONFIG
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WORKSPACE_ROOT = os.path.join(REPO_ROOT, "workspace")
+DATA_ROOT = os.path.join(WORKSPACE_ROOT, "data")
+LOG_ROOT = os.path.join(WORKSPACE_ROOT, "logs")
+DEBUG_ROOT = os.path.join(WORKSPACE_ROOT, "debug")
+
 GT_SOURCE = "ois"
 
-INPUT_DIR = f"aligned/gt_{GT_SOURCE}/color"
-OUTPUT_DIR = f"dataset_256/gt_{GT_SOURCE}"
+INPUT_DIR = os.path.join(DATA_ROOT, "aligned", f"gt_{GT_SOURCE}", "color")
+OUTPUT_DIR = os.path.join(DATA_ROOT, "dataset_256", f"gt_{GT_SOURCE}")
 
 TARGET_SIZE = 256
 
-LOG_DIR = "logs"
-LOG_FILE = os.path.join(LOG_DIR, "interpolation_log.csv")
+LOG_DIR = LOG_ROOT
+LOG_FILE = os.path.join(LOG_ROOT, "interpolation_log.csv")
 
-DEBUG_DIR = "debug_interpolation"
+DEBUG_DIR = os.path.join(DEBUG_ROOT, "interpolation")
 SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)

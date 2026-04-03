@@ -3,10 +3,13 @@ venv/
 .venv/
 
 # Ignore local datasets and logs (they are usually too large for GitHub)
+workspace/
 dataset/
 dataset_256/
 aligned/
 decoded_frames/
+decoded_frames_jpg/
+staging/
 logs/
 debug_vis/
 debug_alignment/

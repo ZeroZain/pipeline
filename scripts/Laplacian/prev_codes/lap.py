@@ -21,8 +21,26 @@ LAPLACIAN_LOG_DIR = os.path.join(LOG_ROOT, "laplacian")
 SCENE_LOG = os.path.join(LOG_ROOT, "scene_selection_log.csv")
 STATE_FILE = os.path.join(DATASET_ROOT, "dataset_state.json")
 
+<<<<<<< Updated upstream
+MAX_SCENES_PER_VIDEO = 1 # Maximum number of scenes to extract from each video. Adjust based on how many scenes you want per video and how many videos you have. 1 means extracting 1 scene per video, 2 means extracting 2 scenes per video, etc.
+BLUR_PERCENTILE = 30 # When determining the sharpness threshold for a video, use this percentile of the OIS sharpness scores. Adjust based on your data. 30 means using the 30th percentile, 20 means using the 20th percentile (more aggressive), 40 means using the 40th percentile (more conservative), etc.
+
+# controls transition detection and frame pick ranges
+<<<<<<<< Updated upstream:scripts/Laplacian/prev_codes/lap.py
+SHARP_WINDOW = 10
+BLUR_WINDOW = 4
+========
+SHARP_WINDOW = 10 # When looking for sharp frames, consider this many frames before the detected transition. Adjust based on how long you expect the sharp segment to last and how quickly the sharpness rises. 20 means looking at 20 frames before, 10 means looking at 10 frames, etc.
+BLUR_WINDOW = 4 # When looking for sharp frames, consider this many frames before the detected transition. When looking for blur frames, consider this many frames after the detected transition. Adjust based on how long you expect the blur to last and how quickly the sharpness drops. 10 means looking at 10 frames before/after, 5 means looking at 5 frames, etc.
+>>>>>>>> Stashed changes:scripts/Laplacian/lap.py
+BLUR_TO_SHARP_MAX_RATIO = 0.8 # A blur frame must have a sharpness score no more than this ratio of its paired sharp frame to be considered valid. Adjust based on your data. 0.7 means the blur frame can be at most 70% as sharp as the sharp frame, 0.5 means it can be at most 50% as sharp, etc.
+
+DROP_RATIO = 1.1 # A frame is considered a transition if the sharpness drops by at least this factor compared to the previous frame. Adjust based on your data. 1.1 means a 10% drop, 1.2 means a 20% drop, etc.
+STABLE_CHECK = 10 # After detecting a potential transition, check the next STABLE_CHECK frames to ensure they remain blurry (i.e., their sharpness does not rise back above the threshold). Adjust based on how long you expect the blur to last. 3 means checking the next 3 frames, 5 means checking the next 5 frames, etc.
+=======
 MAX_SCENES_PER_VIDEO = 1 
 BLUR_PERCENTILE = 30 # When determining the sharpness threshold for a video, use this percentile of the OIS sharpness scores. Adjust based on your data. 30 means using the 30th percentile, 20 means using the 20th percentile (more aggressive), 40 means using the 40th percentile (more conservative), etc.
+SEARCH_WINDOW = 5 # When matching sharp and blurry frames between OIS and non-OIS, only search within this window size around the detected indices. Adjust based on how closely the two cameras are synchronized. 5 means searching 5 frames before and after, 10 means searching 10 frames before and after, etc.
 
 # controls transition detection and frame pick ranges
 SHARP_WINDOW = 10
@@ -30,10 +48,11 @@ BLUR_WINDOW = 4
 BLUR_TO_SHARP_MAX_RATIO = 0.8 # A blur frame must have a sharpness score no more than this ratio of its paired sharp frame to be considered valid. Adjust based on your data. 0.7 means the blur frame can be at most 70% as sharp as the sharp frame, 0.5 means it can be at most 50% as sharp, etc.
 
 DROP_RATIO = 1.1 # A frame is considered a transition if the sharpness drops by at least this factor compared to the previous frame. Adjust based on your data. 1.1 means a 10% drop, 1.2 means a 20% drop, etc.
-STABLE_CHECK = 10 # After detecting a potential transition, check the next STABLE_CHECK frames to ensure they remain blurry (i.e., their sharpness does not rise back above the threshold). Adjust based on how long you expect the blur to last. 3 means checking the next 3 frames, 5 means checking the next 5 frames, etc.
+STABLE_CHECK = 3 # After detecting a potential transition, check the next STABLE_CHECK frames to ensure they remain blurry (i.e., their sharpness does not rise back above the threshold). Adjust based on how long you expect the blur to last. 3 means checking the next 3 frames, 5 means checking the next 5 frames, etc.
+>>>>>>> Stashed changes
 
 DEBUG_MODE = True
-DEBUG_OUTPUT = "debug_vis"
+DEBUG_OUTPUT = "debug_selection"
 SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 # ================= SETUP =================
@@ -72,7 +91,11 @@ def list_captures(root):
         for name in dirs:
             if name.startswith("capture_"):
                 full_path = os.path.join(current_root, name)
+<<<<<<< Updated upstream
+                rel_path = os.path.normpath(os.path.relpath(full_path, root))
+=======
                 rel_path = os.path.relpath(full_path, root)
+>>>>>>> Stashed changes
                 captures.append(rel_path)
 
         dirs[:] = [name for name in dirs if not name.startswith("capture_")]
@@ -80,6 +103,57 @@ def list_captures(root):
     return sorted(captures, key=lambda path: path.lower())
 
 
+<<<<<<< Updated upstream
+def capture_categories(capture_rel_path):
+    return os.path.normpath(capture_rel_path).split(os.sep)[:-1]
+
+
+def category_key(category_parts):
+    return to_posix(os.path.join(*category_parts)) if category_parts else "."
+
+
+def capture_category_key(capture_rel_path):
+    return category_key(capture_categories(capture_rel_path))
+
+
+def scene_name(scene_id):
+    return f"scene_{scene_id:03d}"
+
+
+def scene_rel_path(capture_name, scene_id):
+    category_parts = capture_categories(capture_name)
+    name = scene_name(scene_id)
+    return os.path.join(*category_parts, name) if category_parts else name
+
+
+def next_scene_ids_from_dataset():
+    next_ids = {}
+
+    if not os.path.exists(DATASET_ROOT):
+        return next_ids
+
+    for current_root, dirs, _ in os.walk(DATASET_ROOT):
+        dirs.sort()
+
+        scene_ids = []
+        child_dirs = []
+
+        for name in dirs:
+            match = SCENE_PATTERN.match(name)
+            if match:
+                scene_ids.append(int(match.group(1)))
+            else:
+                child_dirs.append(name)
+
+        if scene_ids:
+            rel_root = os.path.relpath(current_root, DATASET_ROOT)
+            key = "." if rel_root == "." else to_posix(rel_root)
+            next_ids[key] = max(scene_ids) + 1
+
+        dirs[:] = child_dirs
+
+    return next_ids
+=======
 def next_scene_id_from_dataset():
     max_scene_id = 0
 
@@ -97,22 +171,44 @@ def next_scene_id_from_dataset():
 
 def capture_categories(capture_rel_path):
     return os.path.normpath(capture_rel_path).split(os.sep)[:-1]
+>>>>>>> Stashed changes
 
 # ================= STATE =================
 
 def load_state():
+<<<<<<< Updated upstream
+    discovered_next_scene_ids = next_scene_ids_from_dataset()
+=======
     discovered_next_scene_id = next_scene_id_from_dataset()
+>>>>>>> Stashed changes
 
     if not os.path.exists(STATE_FILE):
         return {
             "processed_captures": [],
+<<<<<<< Updated upstream
+            "next_scene_ids": discovered_next_scene_ids
+        }
+
+=======
             "next_scene_id": discovered_next_scene_id
         }
+>>>>>>> Stashed changes
     with open(STATE_FILE, "r") as f:
         state = json.load(f)
 
     state.setdefault("processed_captures", [])
+<<<<<<< Updated upstream
+    merged_next_scene_ids = dict(discovered_next_scene_ids)
+
+    for key, value in state.get("next_scene_ids", {}).items():
+        if isinstance(value, int) and value > 0:
+            merged_next_scene_ids[key] = max(merged_next_scene_ids.get(key, 1), value)
+
+    state["next_scene_ids"] = merged_next_scene_ids
+    state.pop("next_scene_id", None)
+=======
     state["next_scene_id"] = max(state.get("next_scene_id", 1), discovered_next_scene_id)
+>>>>>>> Stashed changes
     return state
 
 def save_state(state):
@@ -140,8 +236,14 @@ def laplacian_score(image):
 
 # ================= FRAME SCORING =================
 
+<<<<<<< Updated upstream
+def score_frames(folder, capture_name, cam_type, capture_label=None):
+    log_file = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_{cam_type}.csv")
+    label = capture_label or capture_name
+=======
 def score_frames(folder, capture_name, cam_type):
     log_file = os.path.join(LAPLACIAN_LOG_DIR, f"{capture_name}_{cam_type}.csv")
+>>>>>>> Stashed changes
 
     if os.path.exists(log_file):
         scores = []
@@ -158,7 +260,11 @@ def score_frames(folder, capture_name, cam_type):
     files = sorted(os.listdir(folder))
     scores = []
 
+<<<<<<< Updated upstream
+    for f in tqdm(files, desc=f"Scoring {label}-{cam_type}", leave=False):
+=======
     for f in tqdm(files, desc=f"Scoring {capture_name}-{cam_type}", leave=False):
+>>>>>>> Stashed changes
         img = read_image(os.path.join(folder, f))
         if img is None:
             continue
@@ -195,7 +301,11 @@ def find_transitions(values):
 
 # ================= DEBUG =================
 
+<<<<<<< Updated upstream
+def visualize_selection(scene_rel,
+=======
 def visualize_selection(scene_id,
+>>>>>>> Stashed changes
                         ois_sharp, ois_blur,
                         nonois_sharp, nonois_blur,
                         ois_sharp_score, ois_blur_score,
@@ -219,7 +329,11 @@ def visualize_selection(scene_id,
     cv2.putText(vis, f"NO-OIS BLUR: {nonois_blur_score:.2f}",
                 (3*w + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,255), 2)
 
+<<<<<<< Updated upstream
+    out_path = os.path.join(DEBUG_OUTPUT, f"{slugify_path(scene_rel)}.jpg")
+=======
     out_path = os.path.join(DEBUG_OUTPUT, f"scene_{scene_id:03d}.jpg")
+>>>>>>> Stashed changes
     cv2.imwrite(out_path, vis)
 
 # ================= CSV =================
@@ -239,10 +353,15 @@ def build_scene(scene_id, capture_name,
                 nonois_sharp, nonois_blur,
                 ois_dir, nonois_dir):
 
+<<<<<<< Updated upstream
+    rel_path = scene_rel_path(capture_name, scene_id)
+    scene_path = os.path.join(DATASET_ROOT, rel_path)
+=======
     scene_name = f"scene_{scene_id:03d}"
     category_parts = capture_categories(capture_name)
     scene_rel_path = os.path.join(*category_parts, scene_name) if category_parts else scene_name
     scene_path = os.path.join(DATASET_ROOT, scene_rel_path)
+>>>>>>> Stashed changes
     os.makedirs(scene_path, exist_ok=True)
 
     for src_dir, filename, label in [
@@ -257,6 +376,11 @@ def build_scene(scene_id, capture_name,
 
     append_csv(
         SCENE_LOG,
+<<<<<<< Updated upstream
+        ["scene", "capture", "ois_sharp", "ois_blur",
+         "nonois_sharp", "nonois_blur"],
+        [to_posix(rel_path), to_posix(capture_name),
+=======
         ["scene", "split", "method", "capture", "ois_sharp", "ois_blur",
          "nonois_sharp", "nonois_blur"],
         [
@@ -264,6 +388,7 @@ def build_scene(scene_id, capture_name,
          category_parts[0] if len(category_parts) > 0 else "",
          category_parts[1] if len(category_parts) > 1 else "",
          to_posix(capture_name),
+>>>>>>> Stashed changes
          ois_sharp, ois_blur,
          nonois_sharp, nonois_blur]
     )
@@ -277,8 +402,13 @@ def process_capture(capture_name, scene_id):
     nonois_dir = os.path.join(capture_path, "nonois")
     capture_key = slugify_path(capture_name)
 
+<<<<<<< Updated upstream
+    ois_results = score_frames(ois_dir, capture_key, "ois", capture_name)
+    nonois_results = score_frames(nonois_dir, capture_key, "nonois", capture_name)
+=======
     ois_results = score_frames(ois_dir, capture_key, "ois")
     nonois_results = score_frames(nonois_dir, capture_key, "nonois")
+>>>>>>> Stashed changes
 
     if not ois_results or not nonois_results:
         return scene_id
@@ -287,10 +417,15 @@ def process_capture(capture_name, scene_id):
     nonois_values = [s for _, s in nonois_results]
 
     threshold_ois = np.percentile(ois_values, BLUR_PERCENTILE)
+<<<<<<< Updated upstream
     threshold_nonois = np.percentile(nonois_values, BLUR_PERCENTILE)
 
     transitions = find_transitions(ois_values)
     nonois_transitions = find_transitions(nonois_values)
+=======
+
+    transitions = find_transitions(ois_values)
+>>>>>>> Stashed changes
 
     scene_count = 0
 
@@ -323,7 +458,12 @@ def process_capture(capture_name, scene_id):
         if ois_values[blur_idx] > (ois_values[sharp_idx] * BLUR_TO_SHARP_MAX_RATIO):
             continue
 
+<<<<<<< Updated upstream
+<<<<<<<< Updated upstream:scripts/Laplacian/prev_codes/lap.py
         # non-OIS matching: use independent transition detection (same approach as OIS)
+========
+        # non-OIS matching uses non-OIS transition detection (same approach as OIS)
+>>>>>>>> Stashed changes:scripts/Laplacian/lap.py
         if not nonois_transitions:
             continue
 
@@ -352,10 +492,33 @@ def process_capture(capture_name, scene_id):
 
         sharp_file = ois_results[sharp_idx][0]
         blur_file = ois_results[blur_idx][0]
+        rel_path = scene_rel_path(capture_name, scene_id)
+
+        if DEBUG_MODE:
+            visualize_selection(
+                rel_path,
+=======
+        # non-OIS matching
+        sharp_idx_nonois = min(range(len(nonois_values)), key=lambda x: abs(x - sharp_idx))
+        blur_idx_nonois = min(range(len(nonois_values)), key=lambda x: abs(x - blur_idx))
+
+        s_start = max(0, sharp_idx_nonois - SEARCH_WINDOW)
+        s_end = min(len(nonois_values), sharp_idx_nonois + SEARCH_WINDOW)
+
+        sharp_idx_nonois = max(range(s_start, s_end), key=lambda x: nonois_values[x])
+
+        b_start = max(0, blur_idx_nonois - SEARCH_WINDOW)
+        b_end = min(len(nonois_values), blur_idx_nonois + SEARCH_WINDOW)
+
+        blur_idx_nonois = min(range(b_start, b_end), key=lambda x: nonois_values[x])
+
+        sharp_file = ois_results[sharp_idx][0]
+        blur_file = ois_results[blur_idx][0]
 
         if DEBUG_MODE:
             visualize_selection(
                 scene_id,
+>>>>>>> Stashed changes
                 read_image(os.path.join(ois_dir, sharp_file)),
                 read_image(os.path.join(ois_dir, blur_file)),
                 read_image(os.path.join(nonois_dir, nonois_results[sharp_idx_nonois][0])),
@@ -433,7 +596,11 @@ def main():
 
     captures = list_captures(DECODED_ROOT)
     processed_captures = set(state["processed_captures"])
+<<<<<<< Updated upstream
+    next_scene_ids = state["next_scene_ids"]
+=======
     scene_id = state["next_scene_id"]
+>>>>>>> Stashed changes
 
     for capture in tqdm(captures, desc="Processing"):
 
@@ -441,6 +608,11 @@ def main():
             tqdm.write(f"Skipping (already processed): {capture}")
             continue
 
+<<<<<<< Updated upstream
+        category = capture_category_key(capture)
+        scene_id = next_scene_ids.get(category, 1)
+=======
+>>>>>>> Stashed changes
         prev_scene_id = scene_id
         scene_id = process_capture(capture, scene_id)
 
@@ -448,7 +620,11 @@ def main():
             state["processed_captures"].append(capture)
             processed_captures.add(capture)
 
+<<<<<<< Updated upstream
+        next_scene_ids[category] = scene_id
+=======
         state["next_scene_id"] = scene_id
+>>>>>>> Stashed changes
         save_state(state)
 
     run_full_pipeline = (
@@ -463,4 +639,8 @@ def main():
     run_alignment_pipeline(run_full_pipeline)
 
 if __name__ == "__main__":
+<<<<<<< Updated upstream
     main()
+=======
+    main()
+>>>>>>> Stashed changes

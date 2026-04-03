@@ -13,9 +13,14 @@ from tqdm import tqdm
 
 # ================= CONFIG =================
 
-DECODED_ROOT = "decoded_frames"
-DATASET_ROOT = "dataset"
-LOG_ROOT = "logs"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WORKSPACE_ROOT = os.path.join(REPO_ROOT, "workspace")
+DATA_ROOT = os.path.join(WORKSPACE_ROOT, "data")
+LOG_ROOT = os.path.join(WORKSPACE_ROOT, "logs")
+DEBUG_ROOT = os.path.join(WORKSPACE_ROOT, "debug")
+
+DECODED_ROOT = os.path.join(DATA_ROOT, "decoded_frames")
+DATASET_ROOT = os.path.join(DATA_ROOT, "dataset")
 
 LAPLACIAN_LOG_DIR = os.path.join(LOG_ROOT, "laplacian")
 SCENE_LOG = os.path.join(LOG_ROOT, "scene_selection_log.csv")
@@ -52,7 +57,7 @@ NONOIS_FALLBACK_BLUR_WINDOW = 12
 NONOIS_FALLBACK_RATIO = 0.95
 
 DEBUG_MODE = True
-DEBUG_OUTPUT = "debug_vis"
+DEBUG_OUTPUT = os.path.join(DEBUG_ROOT, "laplacian")
 SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 
 # ================= SETUP =================

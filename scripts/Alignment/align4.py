@@ -12,9 +12,15 @@ from skimage.metrics import structural_similarity as ssim
 
 # CONFIG
 
-DATASET_ROOT = "dataset"
-OUTPUT_ROOT = "aligned"
-DEBUG_ALIGN_DIR = "debug_alignment"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WORKSPACE_ROOT = os.path.join(REPO_ROOT, "workspace")
+DATA_ROOT = os.path.join(WORKSPACE_ROOT, "data")
+LOG_ROOT = os.path.join(WORKSPACE_ROOT, "logs")
+DEBUG_ROOT = os.path.join(WORKSPACE_ROOT, "debug")
+
+DATASET_ROOT = os.path.join(DATA_ROOT, "dataset")
+OUTPUT_ROOT = os.path.join(DATA_ROOT, "aligned")
+DEBUG_ALIGN_DIR = os.path.join(DEBUG_ROOT, "alignment")
 
 GT_SOURCE = "ois"
 
@@ -99,27 +105,27 @@ def open_log(path, header):
 # LOGS
 
 def init_logs():
-    ensure_dir("logs")
+    ensure_dir(LOG_ROOT)
 
     geo_log, geo_writer = open_log(
-        "logs/geo_log.csv",
+        os.path.join(LOG_ROOT, "geo_log.csv"),
         ["scene", "image", "inlier_ratio", "mean_flow", "flow_p90", "flow_roi_p90", "flow_metric", "model", "valid", "fallback"]
     )
 
     photo_log, photo_writer = open_log(
-        "logs/photo_log.csv",
+        os.path.join(LOG_ROOT, "photo_log.csv"),
         ["scene", "image", "mean_before", "mean_after", "valid"]
     )
 
     color_log, color_writer = open_log(
-        "logs/color_log.csv",
+        os.path.join(LOG_ROOT, "color_log.csv"),
         ["scene", "image",
          "deltaE_before", "deltaE_after",
          "ssim", "used_color", "overall_pass"]
     )
 
     scene_fail_log, scene_fail_writer = open_log(
-        "logs/scene_fail_log.csv",
+        os.path.join(LOG_ROOT, "scene_fail_log.csv"),
         ["scene", "failed_images", "failed_count", "failed_phases"]
     )
 
