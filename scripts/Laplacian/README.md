@@ -53,7 +53,7 @@ Cross-Camera Synchronization (Search Window)
           ↓
 Scene Construction (Automatic Folder creation)
           ↓
-dataset/scene_xxx/
+dataset/Method/scene_xxx/
 
 ```
 
@@ -64,19 +64,55 @@ dataset/scene_xxx/
 Place your decoded MotionCam frames in the following hierarchy:
 
 ```text
-project_root/
-├── decoded_frames/
-│   ├── capture_001/
-│   │   ├── ois/ (frame_000001.dng, ...)
-│   │   └── nonois/ (frame_000001.dng, ...)
-
+workspace/
+  data/
+    decoded_frames/
+      HandShake Method/
+        capture_001/
+          ois/    (frame_000001.dng, ...)
+          nonois/ (frame_000001.dng, ...)
+      Sliding Method/
+        capture_001/
+          ois/
+          nonois/
+      Vibration Method/
+        capture_001/
+          ois/
+          nonois/
 ```
 
 * **Synchronization:** Ensure the `ois` and `nonois` folders contain frames from the same recording event.
+* Captures are organized by method only — there are no dataset split folders.
 
 ---
 
-# 4. Logic & Features
+# 4. Output Folder Structure
+
+Scenes are organized by method:
+
+```text
+workspace/
+  data/
+    dataset/
+      HandShake Method/
+        scene_001/
+          ois_sharp.dng
+          ois_blur.dng
+          nonois_sharp.dng
+          nonois_blur.dng
+      Sliding Method/
+        scene_002/
+          ...
+      Vibration Method/
+        scene_003/
+          ...
+```
+
+The `scene_selection_log.csv` records the method of each scene. The `split` column is left empty because dataset split categorization is handled in the dashboard, not in the folder structure.
+
+---
+
+# 5. Logic & Features
 
 ### Laplacian Sharpness Scoring
 
@@ -87,7 +123,7 @@ The script uses the **Variance of the Laplacian** to determine image sharpness.
 
 ### Cross-Camera Search Window
 
-Due to hardware timing differences, OIS and Non-OIS frames might be slightly desynchronized. The script uses a `SEARCH_WINDOW = 3` to look for the best matching sharp/blur frames in the neighboring indices of the secondary camera.
+Due to hardware timing differences, OIS and Non-OIS frames might be slightly desynchronized. The script uses a search window to look for the best matching sharp/blur frames in the neighboring indices of the secondary camera.
 
 ### Progress Tracking (`tqdm`)
 
@@ -98,13 +134,18 @@ Since decoding RAW files is CPU-intensive, the script provides real-time progres
 
 ---
 
-# 5. How to Run
+# 6. How to Run
 
 Ensure your virtual environment is active, then run:
 
 ```bash
-python scripts/laplacian/dataset_builder.py
+python scripts/Laplacian/1lap.py
+```
 
+To run the full pipeline (Laplacian → Alignment → Interpolation):
+
+```bash
+python scripts/Laplacian/1lap.py --mode full
 ```
 
 ### Resuming Progress
@@ -113,7 +154,7 @@ The script maintains a `dataset/dataset_state.json` file. If the process is inte
 
 ---
 
-# 6. Output Summary
+# 7. Output Summary
 
 ### Final Dataset
 
@@ -125,4 +166,4 @@ Each generated scene folder (e.g., `scene_001`) contains:
 ### Documentation Logs
 
 * **`logs/laplacian/`**: Contains raw sharpness scores for every frame (useful for plotting shake profiles).
-* **`logs/scene_selection_log.csv`**: Maps every dataset scene back to the original frame filename for research traceability.
+* **`logs/scene_selection_log.csv`**: Maps every dataset scene back to the original frame filename for research traceability. Columns include `scene`, `split` (empty), `method`, `capture`, and selected frame filenames.

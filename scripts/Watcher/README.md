@@ -4,21 +4,13 @@
 
 The watcher scans a Google Drive Desktop sync folder, detects dataset `capture_xxx` folders, waits until uploads are stable, extracts ZIP files, removes non-DNG files, and moves the cleaned result into the local `decoded_frames` dataset.
 
-The current watcher is built for the dataset hierarchy used in Google Drive:
+The watcher scans the Google Drive root for method folders directly:
 
 ```text
-G:\My Drive\Thesis or Crisis\Videos\Actual Dataset Capture\
-  Training Set\
-  Validation Set\
-  Testing Set\
-```
-
-Inside each split, the watcher expects these method folders:
-
-```text
-HandShake Method
-Sliding Method
-Vibration Method
+G:\My Drive\Thesis or Crisis\Videos\Dataset Capture\
+  HandShake Method\
+  Sliding Method\
+  Vibration Method\
 ```
 
 Inside each method folder, the watcher looks for `capture_xxx` folders.
@@ -28,16 +20,19 @@ Inside each method folder, the watcher looks for `capture_xxx` folders.
 ## Expected Input Structure
 
 ```text
-Actual Dataset Capture/
-  Training Set/
-    HandShake Method/
-      capture_001/
-        ois/
-        nonois/
-    Sliding Method/
-    Vibration Method/
-  Validation Set/
-  Testing Set/
+Dataset Capture/
+  HandShake Method/
+    capture_001/
+      ois/
+      nonois/
+  Sliding Method/
+    capture_001/
+      ois/
+      nonois/
+  Vibration Method/
+    capture_001/
+      ois/
+      nonois/
 ```
 
 Each `capture_xxx` folder must contain both `ois/` and `nonois/`.
@@ -77,17 +72,28 @@ capture_001/
 
 ## Output Structure
 
-The watcher preserves the split and method folders when moving processed captures into local output:
+The watcher preserves the method folder when moving processed captures into local output:
 
 ```text
 decoded_frames/
-  Training Set/
-    Sliding Method/
-      capture_001/
-        ois/
-          *.dng
-        nonois/
-          *.dng
+  HandShake Method/
+    capture_001/
+      ois/
+        *.dng
+      nonois/
+        *.dng
+  Sliding Method/
+    capture_001/
+      ois/
+        *.dng
+      nonois/
+        *.dng
+  Vibration Method/
+    capture_001/
+      ois/
+        *.dng
+      nonois/
+        *.dng
 ```
 
 Only `.dng` files remain in the final output.
@@ -97,7 +103,7 @@ Only `.dng` files remain in the final output.
 ## What The Watcher Does
 
 1. Scans the Google Drive root every `15` seconds.
-2. Finds `capture_xxx` folders under `Training Set`, `Validation Set`, and `Testing Set`.
+2. Finds `capture_xxx` folders under `HandShake Method`, `Sliding Method`, and `Vibration Method`.
 3. Skips captures that are already present in `decoded_frames`.
 4. Skips captures that are incomplete.
 5. Queues only captures that have:
@@ -181,11 +187,11 @@ Field meanings:
 ## Key Paths
 
 - Google Drive input root:
-  - `G:\My Drive\Thesis or Crisis\Videos\Actual Dataset Capture`
+  - `G:\My Drive\Thesis or Crisis\Videos\Dataset Capture`
 - Local staging folder:
-  - `C:\Users\Windows 11\Documents\GitHub\pipeline\staging`
+  - `workspace/data/staging`
 - Local output folder:
-  - `C:\Users\Windows 11\Documents\GitHub\pipeline\decoded_frames`
+  - `workspace/data/decoded_frames`
 
 ---
 

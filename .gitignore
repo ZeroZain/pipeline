@@ -14,6 +14,7 @@ logs/
 debug_vis/
 debug_alignment/
 debug_interpolation/
+workspace_04-04/
 
 # Ignore Python cache files
 __pycache__/

@@ -14,7 +14,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORKSPACE_ROOT = os.path.join(REPO_ROOT, "workspace")
 DATA_ROOT = os.path.join(WORKSPACE_ROOT, "data")
 
-WATCH_FOLDER = r"G:\My Drive\Thesis or Crisis\Videos\Actual Dataset Capture"
+WATCH_FOLDER = r"G:\My Drive\Thesis or Crisis\Videos\Dataset Capture"
 STAGING_FOLDER = os.path.join(DATA_ROOT, "staging")
 OUTPUT_FOLDER = os.path.join(DATA_ROOT, "decoded_frames")
 
@@ -32,7 +32,7 @@ failed_captures = {}
 retry_limit = 1
 retry_counts = {}
 CAPTURE_PREFIX = "capture_"
-DATASET_SPLITS = ("Training Set", "Validation Set", "Testing Set")
+
 CAPTURE_METHODS = ("HandShake Method", "Sliding Method", "Vibration Method")
 SCAN_INTERVAL = 15
 UPLOAD_TIMEOUT = 300
@@ -158,17 +158,11 @@ def find_capture_folders(root):
 
     category_roots = []
 
-    for split_name in DATASET_SPLITS:
-        split_path = os.path.join(root, split_name)
+    for method_name in CAPTURE_METHODS:
+        method_path = os.path.join(root, method_name)
 
-        if not os.path.isdir(split_path):
-            continue
-
-        for method_name in CAPTURE_METHODS:
-            method_path = os.path.join(split_path, method_name)
-
-            if os.path.isdir(method_path):
-                category_roots.append(method_path)
+        if os.path.isdir(method_path):
+            category_roots.append(method_path)
 
     if category_roots:
         for method_path in category_roots:

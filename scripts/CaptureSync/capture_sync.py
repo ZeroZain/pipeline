@@ -34,12 +34,6 @@ os.makedirs(LOGS, exist_ok=True)
 # =========================
 methods = ["handshake", "sliding", "vibration"]
 
-DATASET_MAP = {
-    "training": "Training Set",
-    "validation": "Validation Set",
-    "testing": "Testing Set"
-}
-
 METHOD_MAP = {
     "handshake": "HandShake Method",
     "sliding": "Sliding Method",
@@ -169,46 +163,73 @@ matched_pairs = match_with_tolerance(ois_map, nonois_map, tolerance_sec=2)
 log(f"Valid pairs: {len(matched_pairs)}")
 
 # =========================
-# USER INPUT
-# =========================
-dataset = input("Dataset (training/validation/testing): ").strip().lower()
-
-if dataset not in DATASET_MAP:
-    raise ValueError("Invalid dataset!")
-
-drive_dataset_folder = DATASET_MAP[dataset]
-
-# =========================
 # CAPTURE INDEX
 # =========================
-def next_index(path):
-    """Return next capture index based on existing folders."""
+def get_existing_max_index(path):
+    """Return the highest existing capture index in a folder, or 0 if none."""
     if not os.path.exists(path):
-        return 1
+        return 0
     nums = [
         int(f.split("_")[1])
         for f in os.listdir(path)
         if f.startswith("capture_") and "_" in f
     ]
-    return max(nums) + 1 if nums else 1
+    return max(nums) if nums else 0
+
+# =========================
+# USER INPUT — PER-METHOD START INDEX
+# =========================
+print("\n--- Capture Start Index Configuration ---")
+print("For each method, enter the desired starting capture index.")
+print("The script will skip to the next available index if existing captures are found.\n")
+
+capture_counters = {}
+
+for method_key in methods:
+    drive_method_folder = METHOD_MAP[method_key]
+    method_path = os.path.join(DRIVE_BASE, drive_method_folder)
+
+    existing_max = get_existing_max_index(method_path)
+    if existing_max > 0:
+        print(f"  [{drive_method_folder}] Existing captures detected (up to capture_{existing_max:03d})")
+
+    while True:
+        raw = input(f"  Start index for {drive_method_folder} (default {existing_max + 1}): ").strip()
+        if not raw:
+            start = existing_max + 1
+            break
+        try:
+            start = int(raw)
+            if start < 1:
+                print("    Index must be >= 1.")
+                continue
+            break
+        except ValueError:
+            print("    Please enter a valid integer.")
+
+    # Ensure we never overwrite existing captures
+    effective_start = max(start, existing_max + 1)
+    if effective_start != start:
+        log(f"  ⚠ {drive_method_folder}: requested start {start} conflicts with existing captures. Using {effective_start} instead.")
+    else:
+        log(f"  {drive_method_folder}: starting at capture_{effective_start:03d}")
+
+    capture_counters[method_key] = effective_start
+
+print()
 
 # =========================
 # PROCESS
 # =========================
-capture_counters = {}
-
 for i, (ois_key, nonois_key) in enumerate(matched_pairs):
     method = methods[i % 3]
     drive_method_folder = METHOD_MAP[method]
 
-    method_path = os.path.join(DRIVE_BASE, drive_dataset_folder, drive_method_folder)
+    method_path = os.path.join(DRIVE_BASE, drive_method_folder)
     os.makedirs(method_path, exist_ok=True)
 
-    if method_path not in capture_counters:
-        capture_counters[method_path] = next_index(method_path)
-
-    idx = capture_counters[method_path]
-    capture_counters[method_path] += 1
+    idx = capture_counters[method]
+    capture_counters[method] += 1
 
     capture = f"capture_{idx:03d}"
     capture_path = os.path.join(method_path, capture)

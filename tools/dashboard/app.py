@@ -1,6 +1,8 @@
 import html
 import re
 from pathlib import Path
+import shutil
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -8,6 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import rawpy
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Scene Dashboard", layout="wide")
 
@@ -17,13 +20,17 @@ DATASET_256 = ROOT / "data" / "dataset_256" / "gt_ois"
 ALIGNED_COLOR = ROOT / "data" / "aligned" / "gt_ois" / "color"
 DECODED_FRAMES = ROOT / "data" / "decoded_frames"
 
-DEBUG_ROOT = ROOT / "debug"
-ALIGN_DEBUG = DEBUG_ROOT / "alignment"
-INTERP_DEBUG = DEBUG_ROOT / "interpolation"
-LAPLACIAN_DEBUG = DEBUG_ROOT / "laplacian"
+EXPORT_ROOT = ROOT / "data"
+SPLIT_OPTIONS = ["Unassigned", "Training", "Validation", "Testing"]
+SPLIT_EXPORT_MAP = {
+    "Training": "train",
+    "Validation": "val",
+    "Testing": "test",
+}
 
 LOG_DIR = ROOT / "logs"
 LAPLACIAN_DIR = LOG_DIR / "laplacian"
+OVERRIDES_CSV = LOG_DIR / "scene_overrides.csv"
 
 FLOW_THRESHOLD = 15.0
 SSIM_THRESHOLD = 0.70
@@ -40,15 +47,18 @@ IMAGE_LABELS = {
     "nonois_sharp.jpg": "Non-OIS Sharp",
     "nonois_blur.jpg": "Non-OIS Blur",
 }
+
+# Simplified frame groups with flattened layouts so we can allocate identical columns
 FRAME_GROUPS = {
     "ois": [
         ("Sharp", "ois_sharp"),
-        ("Drop", "ois_drop_frame_actual", "ois_drop_frame"),
+        ("Drop", "ois_drop_frame_actual"),
         ("Blur", "ois_blur"),
     ],
     "nonois": [
         ("Sharp", "nonois_sharp"),
-        ("Drop", "nonois_drop_frame_actual", "nonois_drop_frame"),
+        ("Drop Actual", "nonois_drop_frame_actual"),
+        ("Drop Fallback", "nonois_drop_frame"),
         ("Blur", "nonois_blur"),
     ],
 }
@@ -83,8 +93,8 @@ def parse_scene(scene):
     scene_name = parts[-1] if parts else "unknown_scene"
     match = re.search(r"(\d+)$", scene_name)
     return {
-        "split": parts[0] if len(parts) > 0 else "Unknown",
-        "method": parts[1] if len(parts) > 1 else "Unknown",
+        "split": "Unassigned",
+        "method": parts[0] if len(parts) > 0 else "Unknown",
         "scene_name": scene_name,
         "scene_number": int(match.group(1)) if match else 10**9,
     }
@@ -131,6 +141,35 @@ def extract_capture_number(capture):
         return "-"
     match = re.search(r"capture_(\d+)", str(capture))
     return match.group(1) if match else capture
+
+
+# ---- Overrides Handling ----
+def load_overrides():
+    if OVERRIDES_CSV.exists():
+        return pd.read_csv(OVERRIDES_CSV)
+    return pd.DataFrame(columns=["scene", "override_type", "old_value", "new_value", "timestamp"])
+
+
+def save_override(scene, override_type, old_value, new_value):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    new_row = pd.DataFrame([{
+        "scene": scene,
+        "override_type": override_type,
+        "old_value": old_value,
+        "new_value": new_value,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }])
+    
+    if OVERRIDES_CSV.exists():
+        df = pd.read_csv(OVERRIDES_CSV)
+        # Remove any existing override of the same type for this scene to keep only the latest active override
+        df = df[~((df["scene"] == scene) & (df["override_type"] == override_type))]
+        df = pd.concat([df, new_row], ignore_index=True)
+        df.to_csv(OVERRIDES_CSV, index=False)
+    else:
+        new_row.to_csv(OVERRIDES_CSV, index=False)
+
+
 st.markdown(
     """
     <style>
@@ -139,7 +178,6 @@ st.markdown(
         --sb-bg: var(--backgroundColor);
         --sb-fg: var(--textColor);
         --sb-card: var(--secondaryBackgroundColor);
-        --sb-muted: rgba(115,128,150,0.6);
     }
     .block-container {
         padding-top: 1.2rem;
@@ -149,21 +187,111 @@ st.markdown(
     }
     div[data-testid="stMetric"] {
         border: 1px solid rgba(128,128,128,0.10);
-        border-radius: 12px;
-        padding: 0.35rem 0.6rem;
+        border-radius: 8px;
+        padding: 0.6rem 1rem;
         background: var(--sb-card);
         color: var(--sb-fg);
+        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
     }
     .dashboard-card {
-        padding:1.1rem 1.2rem;
-        border:1px solid rgba(100,110,120,0.06);
-        border-radius:16px;
-        background:var(--sb-card);
-        color:var(--sb-fg);
+        padding: 1.4rem 1.6rem;
+        border: 1px solid rgba(128,128,128,0.15);
+        border-radius: 12px;
+        background: var(--sb-card);
+        color: var(--sb-fg);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.03);
     }
-    .dashboard-card .muted { color:var(--sb-muted); font-weight:600; font-size:0.85rem; }
-    .dashboard-badge { display:inline-block; margin:0 0.35rem 0.35rem 0; padding:0.28rem 0.7rem; border-radius:999px; font-size:0.78rem; font-weight:600; }
-    .stImage { border-radius:8px; }
+    .dashboard-card .muted { 
+        color: var(--textColor); 
+        opacity: 0.6; 
+        font-weight: 600; 
+        font-size: 0.75rem; 
+        text-transform: uppercase; 
+        letter-spacing: 0.8px;
+    }
+    .dashboard-badge { 
+        display: inline-block; 
+        margin: 0 0.4rem 0.4rem 0; 
+        padding: 0.3rem 0.8rem; 
+        border-radius: 999px; 
+        font-size: 0.75rem; 
+        font-weight: 700; 
+        text-transform: uppercase; 
+        letter-spacing: 0.5px;
+    }
+    .stImage { border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    
+    /* Clean Badge Colors */
+    .badge-ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.3); }
+    .badge-info { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-bad { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-muted { background: rgba(128, 128, 128, 0.15); color: var(--textColor); border: 1px solid rgba(128, 128, 128, 0.3); }
+    .badge-neutral { background: var(--secondaryBackgroundColor); color: var(--textColor); border: 1px solid rgba(128, 128, 128, 0.2); }
+    
+    .badge-keep { background: rgba(34, 197, 94, 0.2); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.5); }
+    .badge-reject { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.5); }
+    .badge-flag { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.5); }
+
+    /* Bulletproof Alignment Fixes for Review Panel */
+    div[data-testid="stHorizontalBlock"]:has(.review-action-panel-marker) {
+        align-items: flex-end !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.review-action-panel-marker) div[data-testid="stTextInput"] input {
+        height: 42px !important;
+        min-height: 42px !important;
+        box-sizing: border-box;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.review-action-panel-marker) button {
+        height: 42px !important;
+        min-height: 42px !important;
+        margin: 0 !important;
+        box-sizing: border-box;
+    }
+
+    /* Responsive CSS Grid for Scorecards */
+    .metric-grid-4 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    .metric-grid-2 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    .scorecard-card {
+        border: 1px solid rgba(128,128,128,0.15);
+        border-radius: 8px;
+        padding: 1rem;
+        background: var(--secondaryBackgroundColor);
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .scorecard-title {
+        font-size: 0.75rem; 
+        font-weight: 600; 
+        color: var(--textColor);
+        opacity: 0.6; 
+        text-transform: uppercase; 
+        letter-spacing: 0.5px; 
+        margin-bottom: 0.3rem;
+    }
+    .scorecard-value {
+        font-size: 1.6rem; 
+        font-weight: 700; 
+        color: var(--textColor);
+        line-height: 1.2;
+    }
+    .scorecard-status {
+        font-size: 0.8rem; 
+        font-weight: 700; 
+        margin-top: 0.2rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -180,28 +308,6 @@ def first_existing_path(candidates):
 def resolve_scene_dir(root, rel_path):
     parts = split_rel_path(rel_path)
     return root.joinpath(*parts) if parts else root
-
-
-def resolve_debug_image(scene, folder):
-    slug = slugify_rel_path(scene)
-    return first_existing_path(
-        [
-            folder / f"{slug}.jpg",
-            folder / f"{slug}.jpeg",
-            folder / f"{slug}.png",
-        ]
-    )
-
-
-def resolve_laplacian_debug(scene):
-    scene_name = parse_scene(scene)["scene_name"]
-    return first_existing_path(
-        [
-            LAPLACIAN_DEBUG / f"{scene_name}.jpg",
-            LAPLACIAN_DEBUG / f"{scene_name}.jpeg",
-            LAPLACIAN_DEBUG / f"{scene_name}.png",
-        ]
-    )
 
 
 def laplacian_csv_path(capture, cam_type):
@@ -395,6 +501,14 @@ def build_scene_summary(logs):
         review_group = review.groupby("scene", as_index=False).agg(review_count=("scene", "size"))
         summary = summary.merge(review_group, on="scene", how="left")
 
+    # Apply Manual Overrides for Methods and Splits logically
+    overrides = load_overrides()
+    if not overrides.empty:
+        split_overrides = overrides[overrides["override_type"] == "split"].set_index("scene")["new_value"].to_dict()
+        method_overrides = overrides[overrides["override_type"] == "method"].set_index("scene")["new_value"].to_dict()
+        summary["split"] = summary.apply(lambda row: split_overrides.get(row["scene"], row["split"]), axis=1)
+        summary["method"] = summary.apply(lambda row: method_overrides.get(row["scene"], row["method"]), axis=1)
+
     defaults = {
         "max_flow": pd.NA,
         "min_ssim": pd.NA,
@@ -420,15 +534,6 @@ def build_scene_summary(logs):
     )
     summary["has_dataset_256"] = summary["scene"].map(lambda s: has_named_images(DATASET_256, s))
     summary["has_aligned_color"] = summary["scene"].map(lambda s: has_named_images(ALIGNED_COLOR, s))
-    summary["has_alignment_debug"] = summary["scene"].map(
-        lambda s: resolve_debug_image(s, ALIGN_DEBUG) is not None
-    )
-    summary["has_interpolation_debug"] = summary["scene"].map(
-        lambda s: resolve_debug_image(s, INTERP_DEBUG) is not None
-    )
-    summary["has_laplacian_debug"] = summary["scene"].map(
-        lambda s: resolve_laplacian_debug(s) is not None
-    )
     summary["has_ois_laplacian"] = summary["capture"].map(
         lambda c: laplacian_csv_path(c, "ois") is not None
     )
@@ -444,12 +549,154 @@ def build_scene_summary(logs):
     summary["missing_assets"] = ~(
         summary["has_dataset_256"]
         & summary["has_aligned_color"]
-        & summary["has_alignment_debug"]
-        & summary["has_interpolation_debug"]
         & summary["has_ois_laplacian"]
         & summary["has_nonois_laplacian"]
     )
     return summary
+
+
+# -------------------------------------------------------------------------------------
+# Parsing, scoring, and UI helpers
+# -------------------------------------------------------------------------------------
+
+def section_header(title, level="h3", top_margin="2rem"):
+    """Renders a clean, unified section header with a bottom border."""
+    st.markdown(
+        f"""
+        <{level} style="
+            border-bottom: 1px solid rgba(128,128,128,0.2); 
+            padding-bottom: 0.4rem; 
+            margin-top: {top_margin}; 
+            margin-bottom: 1.2rem; 
+            color: var(--textColor);
+            font-weight: 600;
+        ">{html.escape(title)}</{level}>
+        """, 
+        unsafe_allow_html=True
+    )
+
+
+def parse_failed_images_detail(failed_images_str):
+    if failed_images_str is None or pd.isna(failed_images_str) or not str(failed_images_str).strip():
+        return []
+    results = []
+    for entry in str(failed_images_str).split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "|" in entry:
+            image, phase_info = entry.split("|", 1)
+            detail = ""
+            if ":" in phase_info:
+                phase_info, detail = phase_info.split(":", 1)
+            for phase in phase_info.split("&"):
+                results.append({"image": image.strip(), "phase": phase.strip(), "detail": detail.strip()})
+        else:
+            results.append({"image": entry, "phase": "unknown", "detail": ""})
+    return results
+
+
+def get_scene_review_map(review_df):
+    if review_df.empty or "scene" not in review_df.columns:
+        return {}
+    review_map = {}
+    for _, row in review_df.iterrows():
+        scene = row.get("scene")
+        label = row.get("label")
+        if scene is not None and not pd.isna(scene) and label is not None and not pd.isna(label):
+            review_map[str(scene)] = str(label).upper()
+    return review_map
+
+
+def compute_laplacian_deltas(sel_row, ois_df, nonois_df):
+    deltas = {}
+    for cam, df in [("ois", ois_df), ("nonois", nonois_df)]:
+        if sel_row is None or df is None:
+            deltas[cam] = {"sharp": None, "blur": None, "delta": None}
+            continue
+        sharp_frame = frame_value(sel_row, f"{cam}_sharp")
+        blur_frame = frame_value(sel_row, f"{cam}_blur")
+        sharp_score = metric_value(df, sharp_frame)
+        blur_score = metric_value(df, blur_frame)
+        delta = None
+        if sharp_score is not None and blur_score is not None:
+            delta = float(sharp_score) - float(blur_score)
+        deltas[cam] = {"sharp": sharp_score, "blur": blur_score, "delta": delta}
+    return deltas
+
+
+def collect_failed_phases(fail_df):
+    phases = set()
+    if fail_df.empty or "failed_phases" not in fail_df.columns:
+        return sorted(phases)
+    for val in fail_df["failed_phases"].dropna().astype(str):
+        for part in val.split(";"):
+            part = part.strip()
+            if part:
+                phases.add(part)
+    return sorted(phases)
+
+
+def collect_failed_image_types(fail_df):
+    images = set()
+    if fail_df.empty or "failed_images" not in fail_df.columns:
+        return sorted(images)
+    for val in fail_df["failed_images"].dropna().astype(str):
+        for detail in parse_failed_images_detail(val):
+            base = detail["image"].replace(".dng", "").replace(".jpg", "")
+            if base:
+                images.add(base)
+    return sorted(images)
+
+
+def export_dataset(keep_scenes_df, source_root, export_root):
+    manifest = []
+
+    # Only create folders for splits that have assigned scenes
+    assigned = keep_scenes_df[keep_scenes_df["split"] != "Unassigned"]
+    if assigned.empty:
+        return pd.DataFrame()
+
+    for ds_type in ["ois", "nonois"]:
+        for split_label in assigned["split"].unique():
+            split_key = SPLIT_EXPORT_MAP.get(split_label, split_label.lower())
+            (export_root / f"dataset_{ds_type}" / split_key / "input").mkdir(parents=True, exist_ok=True)
+            (export_root / f"dataset_{ds_type}" / split_key / "target").mkdir(parents=True, exist_ok=True)
+
+    for split_label in sorted(assigned["split"].unique()):
+        split_key = SPLIT_EXPORT_MAP.get(split_label, split_label.lower())
+        split_scenes = assigned[assigned["split"] == split_label].sort_values("scene_number")
+
+        for idx, (_, row) in enumerate(split_scenes.iterrows(), start=1):
+            scene = row["scene"]
+            number = f"{idx:03d}"
+            scene_dir = resolve_scene_dir(source_root, scene)
+
+            for ds_type, blur_file, sharp_file in [
+                ("ois", "ois_blur.jpg", "ois_sharp.jpg"),
+                ("nonois", "nonois_blur.jpg", "nonois_sharp.jpg"),
+            ]:
+                input_src = scene_dir / blur_file
+                target_src = scene_dir / sharp_file
+                input_dst = export_root / f"dataset_{ds_type}" / split_key / "input" / f"{number}.jpg"
+                target_dst = export_root / f"dataset_{ds_type}" / split_key / "target" / f"{number}.jpg"
+
+                input_ok = input_src.exists()
+                target_ok = target_src.exists()
+                if input_ok:
+                    shutil.copy2(str(input_src), str(input_dst))
+                if target_ok:
+                    shutil.copy2(str(target_src), str(target_dst))
+
+                manifest.append({
+                    "scene": scene, "split": split_key, "dataset": ds_type,
+                    "number": number, "input_exists": input_ok, "target_exists": target_ok,
+                })
+
+    manifest_df = pd.DataFrame(manifest)
+    manifest_path = LOG_DIR / "dataset_export_log.csv"
+    manifest_df.to_csv(manifest_path, index=False)
+    return manifest_df
 
 
 def scene_image_notes(selection_row):
@@ -464,7 +711,7 @@ def scene_image_notes(selection_row):
 
 
 def render_scene_image_grid(title, root, scene, selection_row=None):
-    st.subheader(title)
+    section_header(title, level="h4", top_margin="1rem")
     scene_dir = resolve_scene_dir(root, scene)
     notes = scene_image_notes(selection_row)
     cols = st.columns(4)
@@ -482,33 +729,23 @@ def render_scene_image_grid(title, root, scene, selection_row=None):
                 st.warning(f"Missing: {name}")
 
 
-def render_debug_image(title, path, empty_message):
-    st.subheader(title)
-    if path is None:
-        st.info(empty_message)
-        return
-    st.image(str(path), use_container_width=True)
-    st.caption(path.name)
-
-
 def tag_html(text, tone):
-    colors = {
-        "ok": ("#ecfdf3", "#166534"),
-        "info": ("#eff6ff", "#1d4ed8"),
-        "warn": ("#fff7ed", "#9a3412"),
-        "bad": ("#fef2f2", "#991b1b"),
-        "muted": ("#f1f5f9", "#334155"),
+    tone_classes = {
+        "ok": "badge-ok",
+        "info": "badge-info",
+        "warn": "badge-warn",
+        "bad": "badge-bad",
+        "muted": "badge-muted",
+        "neutral": "badge-neutral",
+        "keep": "badge-keep",
+        "reject": "badge-reject",
+        "flag": "badge-flag",
     }
-    bg, fg = colors[tone]
-    return (
-        f'<span style="display:inline-block;margin:0 0.35rem 0.35rem 0;'
-        f"padding:0.28rem 0.7rem;border-radius:999px;"
-        f'background:{bg};color:{fg};font-size:0.78rem;font-weight:600;">'
-        f"{html.escape(str(text))}</span>"
-    )
+    cls = tone_classes.get(tone, "badge-neutral")
+    return f'<span class="dashboard-badge {cls}">{html.escape(str(text))}</span>'
 
 
-def render_scene_header(scene_row, filtered_count, filtered_index):
+def render_scene_header(scene_row, filtered_count, filtered_index, latest_review=None):
     scene = scene_row["scene"]
     badges = [
         tag_html(scene_row["split"], "info"),
@@ -516,6 +753,14 @@ def render_scene_header(scene_row, filtered_count, filtered_index):
         tag_html(f"Scene {scene_row['scene_name']}", "muted"),
         tag_html(f"{filtered_index}/{filtered_count} in filter", "muted"),
     ]
+
+    # Prepend prominent review status if it exists
+    if latest_review == "KEEP":
+        badges.insert(0, tag_html("REVIEW: KEEP", "keep"))
+    elif latest_review == "REJECT":
+        badges.insert(0, tag_html("REVIEW: REJECT", "reject"))
+    elif latest_review == "FLAG":
+        badges.insert(0, tag_html("REVIEW: FLAG", "flag"))
 
     if above(scene_row.get("max_flow"), FLOW_THRESHOLD):
         badges.append(tag_html("Bad Alignment", "bad"))
@@ -534,9 +779,9 @@ def render_scene_header(scene_row, filtered_count, filtered_index):
         (
             '<div class="dashboard-card">'
             '<div class="muted">Current Scene</div>'
-            f'<div style="font-size:1.75rem;font-weight:700;">{html.escape(scene_row["scene_name"])}</div>'
-            f'<div class="muted" style="margin-top:0.35rem;">{html.escape(scene)}</div>'
-            f'<div style="margin-top:0.8rem;">{"".join(badges)}</div>'
+            f'<div style="font-size:2.2rem;font-weight:800;margin-bottom:0.2rem;line-height:1.2;">{html.escape(scene_row["scene_name"])}</div>'
+            f'<div class="muted" style="margin-bottom:1rem;font-size:0.85rem;text-transform:none;letter-spacing:normal;">{html.escape(scene)}</div>'
+            f'<div>{"".join(badges)}</div>'
             "</div>"
             '<br>'
         ),
@@ -545,12 +790,24 @@ def render_scene_header(scene_row, filtered_count, filtered_index):
 
 
 def render_asset_metrics(asset_status):
-    st.subheader("Asset Coverage")
+    section_header("Asset Coverage", level="h4", top_margin="1rem")
     items = list(asset_status.items())
     for start in range(0, len(items), 3):
         cols = st.columns(3)
         for col, (label, available) in zip(cols, items[start:start + 3]):
-            col.metric(label, "Ready" if available else "Missing")
+            color = "#22c55e" if available else "#ef4444"
+            status_text = "Ready" if available else "Missing"
+            
+            # Custom styled cards for asset status
+            col.markdown(
+                f"""
+                <div style="border: 1px solid rgba(128,128,128,0.15); border-radius: 8px; padding: 1rem; background: var(--secondaryBackgroundColor); margin-bottom: 0.5rem;">
+                    <div style="font-size: 0.75rem; font-weight: 600; color: var(--textColor); opacity: 0.6; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.2rem;">{label}</div>
+                    <div style="font-size: 1.1rem; font-weight: 700; color: {color};">{status_text}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
 
 def metric_value(df, frame):
@@ -563,10 +820,15 @@ def metric_value(df, frame):
 
 
 def frame_value(row, *keys):
+    if row is None:
+        return None
     for key in keys:
         value = row.get(key)
         if value is not None and not pd.isna(value):
-            return str(value)
+            text = str(value).strip()
+            # Ignore empty or nan representations
+            if text.lower() not in ["nan", "none", ""]:
+                return text
     return None
 
 
@@ -578,82 +840,46 @@ def resolve_frame_path(capture, cam_type, frame):
 
 
 def render_selected_frames(capture, cam_type, lap_df, row):
-    cols = st.columns(3)
-    # display sizes (pixels)
-    width_large = 360
-    width_small = 160
-    height_large = 240
-    height_small = 120
+    # Enforce exactly 4 uniform columns so containers are the exact same size for both sets of frames
+    cols = st.columns(4)
+    cam_label = "OIS" if cam_type == "ois" else "Non-OIS"
 
-    def _placeholder(w, h, text="No frame"):
-        img = np.full((h, w, 3), 220, dtype=np.uint8)
-        return img
+    # HTML-based placeholder that natively adapts to light and dark themes
+    def _placeholder(text="NO FRAME"):
+        st.markdown(
+            f"""
+            <div style="aspect-ratio: 3/2; width: 100%; display: flex; align-items: center; justify-content: center; background-color: rgba(128,128,128,0.1); border-radius: 6px; border: 1px dashed rgba(128,128,128,0.3); color: var(--textColor); opacity: 0.6; font-weight: 700; font-size: 0.85rem; letter-spacing: 1px; margin-bottom: 1rem;">
+                {text}
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+
     for col, spec in zip(cols, FRAME_GROUPS[cam_type]):
         label = spec[0]
+        frame_key = spec[1]
+        
         with col:
-            st.markdown(f"**{cam_type.upper()} {label}**")
+            st.markdown(f"**{cam_label} {label}**")
 
-            # If this is a Drop stage with an actual + fallback frame, show both
-            if label.lower() == "drop" and len(spec) >= 3:
-                actual_key = spec[1]
-                fallback_key = spec[2]
-                actual_frame = frame_value(row, actual_key)
-                fallback_frame = frame_value(row, fallback_key)
-                left_col, right_col = st.columns(2)
-
-                with left_col:
-                    st.markdown("**Actual**")
-                    if actual_frame:
-                        path_a = resolve_frame_path(capture, cam_type, actual_frame)
-                        if path_a is not None and path_a.exists():
-                            img = load_display_image(str(path_a))
-                            if img is not None:
-                                st.image(img, width=width_small)
-                            else:
-                                st.warning("Could not decode actual drop frame")
-                        else:
-                            st.warning("Actual drop frame missing")
-                        st.caption(actual_frame)
-                        st.caption(f"Laplacian score: {format_num(metric_value(lap_df, actual_frame))}")
-                    else:
-                        st.image(_placeholder(width_small, height_small), width=width_small)
-                        st.caption("No actual drop frame")
-
-                with right_col:
-                    st.markdown("**Fallback**")
-                    if fallback_frame and fallback_frame != actual_frame:
-                        path_f = resolve_frame_path(capture, cam_type, fallback_frame)
-                        if path_f is not None and path_f.exists():
-                            img = load_display_image(str(path_f))
-                            if img is not None:
-                                st.image(img, width=width_small)
-                            else:
-                                st.warning("Could not decode fallback drop frame")
-                        else:
-                            st.warning("Fallback drop frame missing")
-                        st.caption(fallback_frame)
-                        st.caption(f"Laplacian score: {format_num(metric_value(lap_df, fallback_frame))}")
-                    else:
-                        # show same-size placeholder to keep layout consistent
-                        st.image(_placeholder(width_small, height_small), width=width_small)
-                        st.caption("No fallback drop frame")
-
-                continue
-
-            # Default single-frame stages (Sharp / Blur)
-            frame = frame_value(row, *spec[1:])
+            frame = frame_value(row, frame_key)
             path = resolve_frame_path(capture, cam_type, frame)
             score = metric_value(lap_df, frame)
+
             if path is not None and path.exists():
                 image = load_display_image(str(path))
                 if image is not None:
-                    st.image(image, width=width_large)
+                    st.image(image, use_container_width=True)
                 else:
-                    st.warning("Could not decode frame")
+                    _placeholder(text="CORRUPT")
             else:
-                st.warning("Frame missing")
+                _placeholder()
+
             if frame:
                 st.caption(frame)
+            else:
+                st.caption("No frame")
+            
             st.caption(f"Laplacian score: {format_num(score)}")
 
 
@@ -665,111 +891,155 @@ def plot_laplacian(df, title, markers):
     # normalize dataframe for plotting
     df_plot = df.reset_index(drop=True).reset_index().rename(columns={"index": "idx"})
 
-    # Try Altair for an interactive chart (hover shows frame and score). If Altair
-    # is not installed, fall back to the static matplotlib plot.
+    # Aggregate labels for markers that fall on the exact same frame (prevents circles from hiding each other)
+    frame_to_labels = {}
+    frame_to_color = {}
+    for label, frame, color in markers:
+        if frame is None or str(frame).lower() in ["nan", "none", ""]:
+            continue
+        frame_str = str(frame)
+        if frame_str in frame_to_labels:
+            frame_to_labels[frame_str].append(label)
+            # Give overlapped points a highly visible distinct amber color
+            frame_to_color[frame_str] = "#d97706" 
+        else:
+            frame_to_labels[frame_str] = [label]
+            frame_to_color[frame_str] = color
+
+    marker_data = []
+    frame_to_idx = {str(f): int(i) for i, f in enumerate(df_plot["frame"]) }
+    
+    for frame_str, labels in frame_to_labels.items():
+        if frame_str in frame_to_idx:
+            idx = frame_to_idx[frame_str]
+            score = float(df_plot.iloc[idx]["score"])
+            
+            # Format combined labels cleanly
+            if len(labels) > 1:
+                if set(labels) == {"Drop Actual", "Drop Fallback"}:
+                    combined_label = "Drop (Both)"
+                else:
+                    combined_label = " & ".join(labels)
+            else:
+                combined_label = labels[0]
+                
+            marker_data.append({
+                "idx": idx, 
+                "score": score, 
+                "frame": frame_str, 
+                "label": combined_label,
+                "color": frame_to_color[frame_str]
+            })
+
+    # Build dynamic domain and color scale based on the actual present (and merged) markers
+    domain = ["Laplacian"]
+    range_colors = ["#8B949E"] # A clean slate color that works dynamically in both Light and Dark mode
+    for m in marker_data:
+        if m["label"] not in domain:
+            domain.append(m["label"])
+            range_colors.append(m["color"])
+
     try:
         import altair as alt
 
-        # Prepare color mapping and domain for legend
-        marker_labels = [lbl for lbl, _, _ in markers if lbl]
-        unique_marker_labels = []
-        for lbl in marker_labels:
-            if lbl not in unique_marker_labels:
-                unique_marker_labels.append(lbl)
-
-        domain = ["Laplacian"] + [l for l in unique_marker_labels if l != "Laplacian"]
-        color_map = {
-            "Laplacian": "#2563eb",
-            "Sharp": "#16a34a",
-            "Drop Actual": "#d97706",
-            "Drop Fallback": "#f97316",
-            "Drop": "#d97706",
-            "Blur": "#dc2626",
-        }
-        range_colors = [color_map.get(k, "#888888") for k in domain]
-
-        # attach a label for the main line series
         df_plot = df_plot.copy()
         df_plot["label"] = "Laplacian"
 
-        color_encoding_main = alt.Color(
-            "label:N",
-            scale=alt.Scale(domain=domain, range=range_colors),
-            legend=alt.Legend(title="Series", orient="top"),
+        shared_scale = alt.Scale(domain=domain, range=range_colors)
+        shared_legend = alt.Legend(
+            title=None, 
+            orient="bottom", 
+            direction="horizontal",
+            labelFontSize=12,
+            symbolSize=100
         )
 
-        # base line and points (both use the same label so they share color 'Laplacian')
         line = (
             alt.Chart(df_plot)
-            .mark_line(strokeWidth=2)
+            .mark_line(strokeWidth=1.5, opacity=0.8)
             .encode(
                 x=alt.X("idx:Q", title="Frame Index"),
                 y=alt.Y("score:Q", title="Laplacian Score"),
-                color=color_encoding_main,
+                color=alt.Color("label:N", scale=shared_scale, legend=shared_legend),
                 tooltip=[alt.Tooltip("frame:N", title="Frame"), alt.Tooltip("score:Q", format=".3f", title="Score"), alt.Tooltip("idx:Q", title="Index")],
             )
         )
 
         points = (
             alt.Chart(df_plot)
-            .mark_circle(size=60)
-            .encode(x="idx:Q", y="score:Q", color=color_encoding_main, tooltip=["frame:N", alt.Tooltip("score:Q", format=".3f")])
+            .mark_circle(size=40, opacity=0.4)
+            .encode(
+                x="idx:Q",
+                y="score:Q",
+                color=alt.Color("label:N", scale=shared_scale, legend=None),
+                tooltip=["frame:N", alt.Tooltip("score:Q", format=".3f")]
+            )
         )
 
-        # add annotated markers as separate layers but hide their individual legends
-        marker_layers = []
-        frame_to_idx = {str(f): int(i) for i, f in enumerate(df_plot["frame"]) }
-        for label, frame, _color in markers:
-            if frame is None:
-                continue
-            frame_str = str(frame)
-            if frame_str in frame_to_idx:
-                idx = frame_to_idx[frame_str]
-                score = float(df_plot.iloc[idx]["score"])
-                mdf = pd.DataFrame([{"idx": idx, "score": score, "frame": frame_str, "label": label}])
-                marker_layers.append(
-                    alt.Chart(mdf)
-                    .mark_point(size=120, filled=True)
-                    .encode(
-                        x="idx:Q",
-                        y="score:Q",
-                        color=alt.Color("label:N", scale=alt.Scale(domain=domain, range=range_colors), legend=None),
-                        tooltip=[alt.Tooltip("label:N", title="Pick"), alt.Tooltip("frame:N", title="Frame"), alt.Tooltip("score:Q", format=".3f", title="Score")],
-                    )
-                )
+        layers = [line, points]
 
-        layered = alt.layer(line, points, *marker_layers).properties(height=360)
+        if marker_data:
+            mdf = pd.DataFrame(marker_data)
+            markers_chart = (
+                alt.Chart(mdf)
+                .mark_point(size=200, filled=True, opacity=1)
+                .encode(
+                    x="idx:Q",
+                    y="score:Q",
+                    color=alt.Color("label:N", scale=shared_scale, legend=shared_legend),
+                    tooltip=[alt.Tooltip("label:N", title="Marker"), alt.Tooltip("frame:N", title="Frame"), alt.Tooltip("score:Q", format=".3f", title="Score")],
+                )
+            )
+            layers.append(markers_chart)
+
+        layered = alt.layer(*layers).properties(height=360, title=title).interactive()
         st.altair_chart(layered, use_container_width=True)
 
     except Exception:
-        # Matplotlib fallback (static)
         df_m = df.reset_index(drop=True)
-        fig, ax = plt.subplots(figsize=(7.2, 3.6))
-        ax.plot(range(len(df_m)), df_m["score"], linewidth=1.8, color="#2563eb", label="Laplacian")
-        ax.grid(alpha=0.25)
+        fig, ax = plt.subplots(figsize=(7.2, 4.0))
+        
+        # Ensures matplotlib plot responds gracefully in Dark Mode environments
+        fig.patch.set_facecolor('none')
+        ax.set_facecolor('none')
+        ax.tick_params(colors='#8B949E')
+        ax.xaxis.label.set_color('#8B949E')
+        ax.yaxis.label.set_color('#8B949E')
+        ax.title.set_color('#8B949E')
+        for spine in ax.spines.values():
+            spine.set_color('#444444')
 
-        frame_to_index = {frame: idx for idx, frame in enumerate(df_m["frame"]) }
-        for label, frame, color in markers:
-            if frame in frame_to_index:
-                idx = frame_to_index[frame]
-                score = df_m.iloc[idx]["score"]
-                ax.scatter(idx, score, s=85, color=color, label=label, zorder=3)
-                ax.annotate(
-                    label,
-                    (idx, score),
-                    xytext=(0, 8),
-                    textcoords="offset points",
-                    ha="center",
-                    fontsize=8,
-                )
+        ax.plot(range(len(df_m)), df_m["score"], linewidth=1.5, color="#8B949E", label="Laplacian", alpha=0.8)
+        ax.grid(alpha=0.15)
+
+        # Plot the aggregated markers
+        for m in marker_data:
+            ax.scatter(m["idx"], m["score"], s=120, color=m["color"], label=m["label"], zorder=3, edgecolors='none', linewidth=1)
+            ax.annotate(
+                m["label"],
+                (m["idx"], m["score"]),
+                xytext=(0, 10),
+                textcoords="offset points",
+                ha="center",
+                fontsize=9,
+                fontweight="bold",
+                color=m["color"] # Matches label color to the marker to be perfectly readable in both modes
+            )
 
         ax.set_title(title)
         ax.set_xlabel("Frame Index")
         ax.set_ylabel("Laplacian Score")
+        
+        # Remove duplicate legend entries
         handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(loc="upper right")
+        by_label = dict(zip(labels, handles))
+        if by_label:
+            # We set legend text color to adapt properly in dark mode
+            legend = ax.legend(by_label.values(), by_label.keys(), loc="lower center", bbox_to_anchor=(0.5, -0.25), ncol=min(4, len(by_label)))
+            for text in legend.get_texts():
+                text.set_color('#8B949E')
 
+        plt.tight_layout()
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
 
@@ -780,18 +1050,18 @@ def build_selection_table(row):
     return pd.DataFrame(
         [
             {
-                "camera": "OIS",
-                "sharp": frame_value(row, "ois_sharp"),
-                "drop_actual": frame_value(row, "ois_drop_frame_actual"),
-                "drop_fallback": frame_value(row, "ois_drop_frame"),
-                "blur": frame_value(row, "ois_blur"),
+                "Camera": "OIS",
+                "Sharp": frame_value(row, "ois_sharp"),
+                "Drop (Actual)": frame_value(row, "ois_drop_frame_actual"),
+                "Drop (Fallback)": "-",
+                "Blur": frame_value(row, "ois_blur"),
             },
             {
-                "camera": "Non-OIS",
-                "sharp": frame_value(row, "nonois_sharp"),
-                "drop_actual": frame_value(row, "nonois_drop_frame_actual"),
-                "drop_fallback": frame_value(row, "nonois_drop_frame"),
-                "blur": frame_value(row, "nonois_blur"),
+                "Camera": "Non-OIS",
+                "Sharp": frame_value(row, "nonois_sharp"),
+                "Drop (Actual)": frame_value(row, "nonois_drop_frame_actual"),
+                "Drop (Fallback)": frame_value(row, "nonois_drop_frame"),
+                "Blur": frame_value(row, "nonois_blur"),
             },
         ]
     )
@@ -806,37 +1076,15 @@ def build_laplacian_score_table(row, ois_df, nonois_df):
         df = ois_df if cam_type == "ois" else nonois_df
         for spec in FRAME_GROUPS[cam_type]:
             stage = spec[0]
-            # For Drop stage, include actual and fallback as separate rows when available
-            if stage.lower() == "drop" and len(spec) >= 3:
-                actual = frame_value(row, spec[1])
-                fallback = frame_value(row, spec[2])
-                rows.append(
-                    {
-                        "camera": label,
-                        "stage": "Drop (actual)",
-                        "frame": actual,
-                        "score": metric_value(df, actual),
-                    }
-                )
-                if fallback and fallback != actual:
-                    rows.append(
-                        {
-                            "camera": label,
-                            "stage": "Drop (fallback)",
-                            "frame": fallback,
-                            "score": metric_value(df, fallback),
-                        }
-                    )
-            else:
-                frame = frame_value(row, *spec[1:])
-                rows.append(
-                    {
-                        "camera": label,
-                        "stage": stage,
-                        "frame": frame,
-                        "score": metric_value(df, frame),
-                    }
-                )
+            frame = frame_value(row, spec[1])
+            rows.append(
+                {
+                    "Camera": label,
+                    "Stage": stage,
+                    "Frame": frame,
+                    "Score": metric_value(df, frame),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -844,11 +1092,12 @@ def render_dataframe(df, empty_message):
     if df.empty:
         st.info(empty_message)
         return
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 def save_review(scene, label, note=""):
     review_path = LOG_DIR / "manual_review.csv"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     row = pd.DataFrame([[scene, label, note]], columns=["scene", "label", "note"])
 
     if review_path.exists():
@@ -857,7 +1106,30 @@ def save_review(scene, label, note=""):
         row.to_csv(review_path, index=False)
 
 
-# consolidated theme-aware CSS applied earlier
+def delete_review_row(scene, global_idx):
+    """Safely delete a single review record utilizing its global index."""
+    review_path = LOG_DIR / "manual_review.csv"
+    if review_path.exists():
+        df = pd.read_csv(review_path)
+        if global_idx in df.index:
+            df = df.drop(index=global_idx)
+            df.to_csv(review_path, index=False)
+
+
+def clear_scene_review(scene):
+    review_path = LOG_DIR / "manual_review.csv"
+    if review_path.exists():
+        df = pd.read_csv(review_path)
+        # Filter out records associated with this specific scene
+        df = df[df["scene"] != scene]
+        df.to_csv(review_path, index=False)
+
+
+def clear_all_global_reviews():
+    review_path = LOG_DIR / "manual_review.csv"
+    if review_path.exists():
+        review_path.unlink()
+
 
 logs = load_all_logs()
 summary = build_scene_summary(logs)
@@ -867,9 +1139,61 @@ if summary.empty:
     st.warning("No scenes found in workspace logs.")
     st.stop()
 
-st.title("Scene Dashboard")
-st.caption("Inspect outputs, debug composites, laplacian picks, and pipeline logs for each scene.")
+# Build global review map for statistics and filtering
+review_map = get_scene_review_map(logs["review"])
+summary["review_status"] = summary["scene"].map(lambda s: review_map.get(s, "NOT REVIEWED"))
 
+# Derive quality status column
+def _quality_status(row):
+    if row.get("failed_count", 0) > 0:
+        return "Has Failures"
+    if row.get("needs_attention", False):
+        return "Needs Attention"
+    return "Clean"
+
+summary["quality_status"] = summary.apply(_quality_status, axis=1)
+
+# ---- Dashboard Statistics Header ----
+total_scenes = len(summary)
+reviewed_count = summary["review_status"].ne("NOT REVIEWED").sum()
+keep_count = summary["review_status"].eq("KEEP").sum()
+reject_count = summary["review_status"].eq("REJECT").sum()
+flag_count = summary["review_status"].eq("FLAG").sum()
+clean_count = summary["quality_status"].eq("Clean").sum()
+attention_count = summary["quality_status"].eq("Needs Attention").sum()
+failed_count_total = summary["quality_status"].eq("Has Failures").sum()
+progress_pct = int(reviewed_count / total_scenes * 100) if total_scenes > 0 else 0
+
+st.markdown(
+    f"""
+    <br>
+    <div style="margin-top: 1rem; margin-bottom: 2rem; padding: 1.6rem; background: var(--secondaryBackgroundColor); border-radius: 12px; border: 1px solid rgba(128,128,128,0.15);">
+        <h1 style="font-size: 2.4rem; font-weight: 800; margin-bottom: 0.3rem; letter-spacing: -0.5px; color: var(--textColor); line-height: 1.2;">Scene Dashboard</h1>
+        <p style="font-size: 1.05rem; color: var(--textColor); opacity: 0.7; margin-bottom: 1rem;">Visual inspection & data cleaning workstation for pipeline outputs.</p>
+        <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 0.8rem;">
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: var(--textColor);">{total_scenes}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Total</span></div>
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: #22c55e;">{keep_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Keep</span></div>
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: #ef4444;">{reject_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Reject</span></div>
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: #f59e0b;">{flag_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Flag</span></div>
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: #3b82f6;">{clean_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Clean</span></div>
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: #8b5cf6;">{total_scenes - int(reviewed_count)}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Unreviewed</span></div>
+        </div>
+        <div style="background: rgba(128,128,128,0.15); border-radius: 999px; height: 8px; overflow: hidden;">
+            <div style="background: linear-gradient(90deg, #22c55e, #3b82f6); height: 100%; width: {progress_pct}%; border-radius: 999px; transition: width 0.3s;"></div>
+        </div>
+        <div style="font-size: 0.75rem; opacity: 0.5; margin-top: 0.3rem;">Review progress: {reviewed_count}/{total_scenes} ({progress_pct}%)</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# ---- Sidebar Setup ----
+status_container = st.sidebar.container()
+selector_container = st.sidebar.container()
+st.sidebar.markdown("---")
+stats_container = st.sidebar.container()
+
+# ---- Sidebar Filters ----
 split_options = sorted(summary["split"].dropna().unique())
 method_options = sorted(summary["method"].dropna().unique())
 
@@ -888,11 +1212,173 @@ sort_mode = st.sidebar.selectbox(
     ],
 )
 
+# Review status filter
+st.sidebar.markdown("---")
+st.sidebar.subheader("Advanced Filters")
+review_options = sorted(summary["review_status"].unique())
+selected_reviews = st.sidebar.multiselect("Review Status", review_options, default=review_options)
+
+# Quality status filter
+quality_options = sorted(summary["quality_status"].unique())
+selected_quality = st.sidebar.multiselect("Quality Status", quality_options, default=quality_options)
+
+# Failed phase filter
+PHASE_LABELS = {
+    "geo": "Geometric Alignment (Flow)",
+    "ssim": "Structural Similarity (SSIM)",
+    "photo": "Photometric Alignment",
+    "color": "Color Transfer",
+    "interpolation": "Frame Interpolation",
+}
+all_phases = collect_failed_phases(logs["fail"])
+if all_phases:
+    selected_phases = st.sidebar.multiselect(
+        "Show scenes that failed in:", 
+        all_phases, 
+        default=[],
+        format_func=lambda x: PHASE_LABELS.get(x, str(x).title().replace("_", " ")),
+        help="Filters the list to only show scenes that failed the selected pipeline validation checks."
+    )
+
+# Flow / SSIM range sliders
+flow_vals = summary["max_flow"].dropna()
+if not flow_vals.empty:
+    flow_min, flow_max = float(flow_vals.min()), float(flow_vals.max())
+    if flow_min < flow_max:
+        flow_range = st.sidebar.slider("Flow ROI p90 range", flow_min, flow_max, (flow_min, flow_max), step=0.5)
+    else:
+        flow_range = (flow_min, flow_max)
+else:
+    flow_range = None
+
+ssim_vals = summary["min_ssim"].dropna()
+if not ssim_vals.empty:
+    ssim_min, ssim_max = float(ssim_vals.min()), float(ssim_vals.max())
+    if ssim_min < ssim_max:
+        ssim_range = st.sidebar.slider("Min SSIM range", ssim_min, ssim_max, (ssim_min, ssim_max), step=0.01)
+    else:
+        ssim_range = (ssim_min, ssim_max)
+else:
+    ssim_range = None
+
+# ---- Scoring Criteria Explainer ----
+st.sidebar.markdown("---")
+with st.sidebar.expander("How Scoring Works", expanded=False):
+    st.markdown("""
+### Laplacian Score
+
+Measures image sharpness using the **variance of the Laplacian** operator. The Laplacian highlights edges and fine detail — a sharp image produces high variance (lots of strong edges), while a blurry image produces low variance (edges are smoothed out).
+
+**How frames are selected:** The pipeline computes the Laplacian score for every decoded frame in a capture sequence, producing a sharpness curve over time. During a motion event (e.g. handshake, vibration), the curve drops as the scene blurs.
+
+- **Sharp frame (target)** — the frame with the highest Laplacian score, selected as the ground truth
+- **Blur frame (input)** — the frame with the lowest Laplacian score during the motion event, representing natural motion blur
+- **Drop frame** — the frame where sharpness first starts falling, marking the onset of motion
+
+**Laplacian Delta** shows `Sharp − Blur`. A large positive delta means the pipeline found a clear distinction between sharp and blurry frames. A small or negative delta is a warning — the "blur" may not be blurry enough for meaningful deblurring training.
+
+---
+
+### Flow ROI p90
+
+After geometric alignment (homography warp), this measures **residual misalignment** between the paired images. Optical flow is computed in the center region of interest, and the 90th-percentile magnitude is reported.
+
+- **PASS**: ≤ 15.0 — the alignment successfully registered the pair
+- **FAIL**: > 15.0 — significant residual motion remains; the homography could not fully correct the viewpoint difference (parallax, rotation, or extreme blur)
+
+p90 is used instead of the mean because large static regions would dilute the average. The 90th percentile captures worst-case misalignment while ignoring the top 10% of outliers (moving objects, occlusion boundaries).
+
+---
+
+### Alignment Confidence (Inlier Ratio)
+
+During geometric alignment, RANSAC fits a homography model to feature matches between the paired images. The **inlier ratio** is the fraction of feature matches that agreed with the final homography.
+
+- **High ratio** (e.g. >50%) — the model is well-supported; many features consistently agree on the transformation
+- **Low ratio** — few features agreed; the homography may be unreliable even if the flow metric looks acceptable
+
+When alignment fails entirely, the system falls back to an identity transform (no warp), logged as `geo:IDENTITY_FALLBACK` in the fail log.
+
+---
+
+### SSIM (Structural Similarity)
+
+Computed after color alignment between each pair of images. SSIM measures structural resemblance — edges, textures, luminance patterns — on a 0 to 1 scale.
+
+- **PASS**: ≥ 0.70 — the pair is structurally consistent
+- **FAIL**: < 0.70 — significant structural differences remain (parallax, occlusion, or failed color transfer)
+
+The scorecard shows the **minimum SSIM** across all image pairs in the scene. If even one pair has poor similarity, the scene is flagged.
+
+---
+
+### Delta E (Color Difference)
+
+CIELAB color difference between paired images after color alignment. Measured in perceptual units where **lower = more color-consistent**.
+
+No hard pass/fail threshold — some color variation is expected between OIS and non-OIS camera modules. This metric is informational and contributes to the composite quality score.
+
+---
+
+### Quality Score (Composite)
+
+A weighted combination for **ranking scenes** by overall quality *(higher = worse)*:
+
+`0.5 × flow + 0.3 × (1 − ssim) × 100 + 0.2 × deltaE`
+
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| Flow p90 | 50% | Geometric alignment is the most critical factor |
+| (1−SSIM)×100 | 30% | Structural mismatch, scaled to ~0-100 range |
+| Delta E | 20% | Color fidelity after alignment |
+
+This is not a pass/fail — it is a **sorting tool**. Use "Sort by: Worst quality" to review the most problematic scenes first.
+
+---
+
+### Scene Status Rules
+
+- **FAIL** — at least one image failed the `geo` or `ssim` phase during pipeline processing
+- **NEEDS ATTENTION** — metrics exceed thresholds (flow > 15 or SSIM < 0.70) but no hard pipeline failure
+- **CLEAN** — zero failures and all metrics within thresholds
+    """)
+
+# ---- Apply All Filters ----
 filtered = summary.copy()
 filtered = filtered[
     filtered["split"].isin(selected_splits) & filtered["method"].isin(selected_methods)
 ]
+filtered = filtered[filtered["review_status"].isin(selected_reviews)]
+filtered = filtered[filtered["quality_status"].isin(selected_quality)]
 
+# Apply phase filter (show scenes that have ANY of the selected phases)
+if all_phases and selected_phases:
+    phase_scenes = set()
+    fail_df = logs["fail"]
+    if not fail_df.empty and "failed_phases" in fail_df.columns:
+        for _, row in fail_df.iterrows():
+            phases_str = str(row.get("failed_phases", ""))
+            scene_phases = {p.strip() for p in phases_str.split(";") if p.strip()}
+            if scene_phases & set(selected_phases):
+                phase_scenes.add(str(row["scene"]))
+    filtered = filtered[filtered["scene"].isin(phase_scenes)]
+
+# Apply flow range filter
+if flow_range is not None:
+    filtered = filtered[
+        filtered["max_flow"].isna() | filtered["max_flow"].between(flow_range[0], flow_range[1])
+    ]
+
+# Apply SSIM range filter
+if ssim_range is not None:
+    filtered = filtered[
+        filtered["min_ssim"].isna() | filtered["min_ssim"].between(ssim_range[0], ssim_range[1])
+    ]
+
+# Apply text search
+if scene_search:
+    search_lower = scene_search.lower()
+    filtered = filtered[filtered["scene"].str.lower().str.contains(search_lower, na=False)]
 
 if sort_mode == "Scene order":
     filtered = filtered.sort_values(["scene_number", "scene"])
@@ -912,27 +1398,15 @@ if filtered.empty:
     st.stop()
 
 scene_labels = {
-    row["scene"]: (
-        f"{row['scene_name']} | {row['method']} | "
-        f"flow {format_num(row.get('max_flow'))} | "
-        f"ssim {format_num(row.get('min_ssim'), 3)}"
-    )
+    row["scene"]: f"{row['scene_name']} | {row['split']} | {row['method']}"
     for _, row in filtered.iterrows()
 }
 
-scene = st.sidebar.selectbox(
+scene = selector_container.selectbox(
     "Select scene",
     filtered["scene"].tolist(),
     format_func=lambda value: scene_labels.get(value, value),
 )
-
-st.sidebar.header("Dataset Stats")
-st.sidebar.metric("Total scenes", int(len(summary)))
-st.sidebar.metric("Filtered scenes", int(len(filtered)))
-st.sidebar.metric("Bad alignment", int(summary["max_flow"].fillna(-1).gt(FLOW_THRESHOLD).sum()))
-st.sidebar.metric("Low SSIM", int(summary["min_ssim"].fillna(1).lt(SSIM_THRESHOLD).sum()))
-st.sidebar.metric("Failed scenes", int(summary["failed_count"].fillna(0).gt(0).sum()))
-st.sidebar.metric("Missing assets", int(summary["missing_assets"].sum()))
 
 scene_row = filtered[filtered["scene"] == scene].iloc[0]
 scene_position = filtered.index[filtered["scene"] == scene][0] + 1
@@ -953,232 +1427,712 @@ review_scene = (
     else pd.DataFrame()
 )
 
+# Extract current review status if available
+current_review_status = None
+if not review_scene.empty:
+    current_review_status = review_scene.iloc[-1]["label"]
+
 capture = None if selection_row is None else selection_row.get("capture")
 ois_df = load_laplacian(capture, "ois")
 nonois_df = load_laplacian(capture, "nonois")
 capture_label = "Missing" if capture is None or pd.isna(capture) else str(capture)
 
+# Render Status Sidebar
+status_container.header("Active Scene Status")
+status_container.metric("Current Review", current_review_status if current_review_status else "Not Reviewed")
+
+
 asset_status = {
-    "256 Images": bool(scene_row["has_dataset_256"]),
-    "Aligned Color": bool(scene_row["has_aligned_color"]),
-    "Alignment Debug": bool(scene_row["has_alignment_debug"]),
-    "Interpolation Debug": bool(scene_row["has_interpolation_debug"]),
-    "OIS Laplacian Log": bool(scene_row["has_ois_laplacian"]),
-    "Non-OIS Laplacian Log": bool(scene_row["has_nonois_laplacian"]),
-    "Laplacian Debug": bool(scene_row["has_laplacian_debug"]),
+    "Interpolated Images": bool(scene_row["has_dataset_256"]),
+    "Aligned Images": bool(scene_row["has_aligned_color"]),
+    "OIS Laplacian Scores": bool(scene_row["has_ois_laplacian"]),
+    "Non-OIS Laplacian Scores": bool(scene_row["has_nonois_laplacian"]),
 }
 
+# --------------------------------------------------------------------------------------
+# GLOBAL DYNAMIC COLOR CODED REVIEW NOTICES
+# --------------------------------------------------------------------------------------
 review_notice = st.session_state.pop("review_notice", None)
 if review_notice:
-    st.success(review_notice)
-
-render_scene_header(scene_row, len(filtered), scene_position)
-
-review_count = scene_row.get("review_count")
-summary_cols = st.columns(5)
-summary_cols[0].metric("Quality Score", format_num(scene_row.get("quality_score")))
-summary_cols[1].metric("Worst Flow ROI P90", format_num(scene_row.get("max_flow")))
-summary_cols[2].metric("Lowest SSIM", format_num(scene_row.get("min_ssim"), 3))
-summary_cols[3].metric("Mean deltaE After", format_num(scene_row.get("mean_deltaE_after")))
-summary_cols[4].metric("Review Count", int(0 if pd.isna(review_count) else review_count))
-
-issues = []
-if above(scene_row.get("max_flow"), FLOW_THRESHOLD):
-    issues.append(f"flow ROI P90 is above threshold ({format_num(scene_row['max_flow'])} > {FLOW_THRESHOLD:.0f})")
-if below(scene_row.get("min_ssim"), SSIM_THRESHOLD):
-    issues.append(f"SSIM is below threshold ({format_num(scene_row['min_ssim'], 3)} < {SSIM_THRESHOLD:.2f})")
-if above(scene_row.get("failed_count"), 0):
-    issues.append(f"scene has {int(scene_row['failed_count'])} failed checks")
-if issues:
-    st.warning("Attention: " + " | ".join(issues))
-
-tabs = st.tabs(["Overview", "Laplacian", "Alignment + Interpolation", "Logs + Review"])
-
-with tabs[0]:
-    render_asset_metrics(asset_status)
-
-    info_cols = st.columns(3)
-    info_cols[0].metric("Capture #", extract_capture_number(capture))
-    info_cols[1].metric("Fallback Used", bool_label(scene_row.get("nonois_used_fallback")))
-    info_cols[2].metric("Linear Scene", bool_label(scene_row.get("is_linear_scene")))
-
-    selection_table = build_selection_table(selection_row)
-    if not selection_table.empty:
-        st.subheader("Selected Frames")
-        st.dataframe(selection_table, use_container_width=True)
-
-    render_scene_image_grid("Final Dataset", DATASET_256, scene, selection_row)
-
-with tabs[2]:
-    debug_cols = st.columns(2)
-    with debug_cols[0]:
-        render_debug_image(
-            "Alignment Debug",
-            resolve_debug_image(scene, ALIGN_DEBUG),
-            "No alignment debug image found for this scene.",
-        )
-    with debug_cols[1]:
-        render_debug_image(
-            "Interpolation Debug",
-            resolve_debug_image(scene, INTERP_DEBUG),
-            "No interpolation debug image found for this scene.",
-        )
-
-    render_scene_image_grid("Aligned Outputs", ALIGNED_COLOR, scene, selection_row)
-    render_scene_image_grid("Interpolated 256 Outputs", DATASET_256, scene, selection_row)
-
-with tabs[1]:
-    # Show laplacian logs and selection decisions for every capture associated with this scene
-    selection_df = logs.get("selection", pd.DataFrame())
-
-    # Gather captures that reference this scene from available logs
-    captures = []
-    for name in ("selection", "geo", "photo", "color", "interpolation"):
-        df = logs.get(name, pd.DataFrame())
-        if not df.empty and "scene" in df.columns and "capture" in df.columns:
-            caps = df[df["scene"] == scene]["capture"].dropna().astype(str).unique().tolist()
-            captures.extend(caps)
-
-    # Fallback to the one in summary/selection if nothing else
-    if not captures and capture is not None and not pd.isna(capture):
-        captures = [str(capture)]
-
-    captures = sorted({str(c) for c in captures})
-
-    if not captures:
-        st.info("No laplacian captures found for this scene.")
+    if review_notice["type"] == "keep":
+        st.success(review_notice["msg"])
+    elif review_notice["type"] == "reject":
+        st.error(review_notice["msg"])
+    elif review_notice["type"] == "flag":
+        st.warning(review_notice["msg"])
     else:
-        st.markdown("**Capture summary:**")
+        st.info(review_notice["msg"])
 
-        summary_rows = []
-        for cap in captures:
-            sel_rows = (
-                selection_df[(selection_df.get("scene") == scene) & (selection_df.get("capture") == cap)]
-                if not selection_df.empty
-                else pd.DataFrame()
-            )
-            sel = sel_rows.iloc[0] if not sel_rows.empty else None
-            ois = load_laplacian(cap, "ois")
-            nonois = load_laplacian(cap, "nonois")
+# --------------------------------------------------------------------------------------
+# MAIN NAVIGATION TABS
+# --------------------------------------------------------------------------------------
+main_tabs = st.tabs(["Scene Inspector", "Data Management & History", "Export Dataset"])
 
-            summary_rows.append(
-                {
-                    "capture": extract_capture_number(cap),
-                    "fallback": bool_label(sel.get("nonois_used_fallback")) if sel is not None else "-",
-                    "linear": bool_label(sel.get("is_linear_scene")) if sel is not None else "-",
-                    "ready": "Yes" if ois is not None and nonois is not None else "Partial",
-                    "ois_sharp_frame": frame_value(sel, "ois_sharp") if sel is not None else "",
-                    "ois_drop_actual": frame_value(sel, "ois_drop_frame_actual") if sel is not None else "",
-                    "ois_drop_fallback": frame_value(sel, "ois_drop_frame") if sel is not None else "",
-                    "ois_blur_frame": frame_value(sel, "ois_blur") if sel is not None else "",
-                    "nonois_sharp_frame": frame_value(sel, "nonois_sharp") if sel is not None else "",
-                    "nonois_drop_actual": frame_value(sel, "nonois_drop_frame_actual") if sel is not None else "",
-                    "nonois_drop_fallback": frame_value(sel, "nonois_drop_frame") if sel is not None else "",
-                    "nonois_blur_frame": frame_value(sel, "nonois_blur") if sel is not None else "",
+# ======================================================================================
+# TAB 1: SCENE INSPECTOR (Localized View)
+# ======================================================================================
+with main_tabs[0]:
+    # Render main header with badges
+    render_scene_header(scene_row, len(filtered), scene_position, current_review_status)
+
+    # Prominent Global Action Panel for Reviews
+    section_header("Scene Review Panel", level="h4", top_margin="0rem")
+
+    # Injecting an invisible marker to guarantee perfect flex-end alignment
+    st.markdown('<div class="review-action-panel-marker" style="display:none;"></div>', unsafe_allow_html=True)
+    rev_cols = st.columns([3, 1, 1, 1])
+    review_note = rev_cols[0].text_input("Note", key="review_note", label_visibility="collapsed", placeholder="Optional Review Note...")
+
+    with rev_cols[1]:
+        if st.button("KEEP", use_container_width=True):
+            save_review(scene, "KEEP", review_note)
+            load_all_logs.clear()
+            st.session_state["review_notice"] = {"msg": f"Saved KEEP for {scene_row['scene_name']}.", "type": "keep"}
+            st.rerun()
+
+    with rev_cols[2]:
+        if st.button("REJECT", use_container_width=True):
+            save_review(scene, "REJECT", review_note)
+            load_all_logs.clear()
+            st.session_state["review_notice"] = {"msg": f"Saved REJECT for {scene_row['scene_name']}.", "type": "reject"}
+            st.rerun()
+
+    with rev_cols[3]:
+        if st.button("FLAG", use_container_width=True):
+            save_review(scene, "FLAG", review_note)
+            load_all_logs.clear()
+            st.session_state["review_notice"] = {"msg": f"Saved FLAG for {scene_row['scene_name']}.", "type": "flag"}
+            st.rerun()
+
+    # JavaScript Injection for specific scene review panel buttons 
+    components.html(
+        """
+        <script>
+        const styleButtonsAndAlign = () => {
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach(btn => {
+                const text = btn.innerText.trim();
+                if (text === 'KEEP') {
+                    btn.style.backgroundColor = 'rgba(34, 197, 94, 0.15)';
+                    btn.style.borderColor = 'rgba(34, 197, 94, 0.5)';
+                    btn.style.color = '#22c55e';
+                } else if (text === 'REJECT') {
+                    btn.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+                    btn.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+                    btn.style.color = '#ef4444';
+                } else if (text === 'FLAG') {
+                    btn.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
+                    btn.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+                    btn.style.color = '#f59e0b';
                 }
+                
+                if (text === 'KEEP' || text === 'REJECT' || text === 'FLAG') {
+                    btn.onmouseover = function() {
+                        if(text === 'KEEP') btn.style.backgroundColor = 'rgba(34, 197, 94, 0.25)';
+                        if(text === 'REJECT') btn.style.backgroundColor = 'rgba(239, 68, 68, 0.25)';
+                        if(text === 'FLAG') btn.style.backgroundColor = 'rgba(245, 158, 11, 0.25)';
+                    }
+                    btn.onmouseout = function() {
+                        if(text === 'KEEP') btn.style.backgroundColor = 'rgba(34, 197, 94, 0.15)';
+                        if(text === 'REJECT') btn.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+                        if(text === 'FLAG') btn.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
+                    }
+                }
+            });
+        };
+        styleButtonsAndAlign();
+        setInterval(styleButtonsAndAlign, 150);
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+    # ---- Quality Scorecard (Upgraded Visuals) ----
+    section_header("Quality Scorecard", level="h3", top_margin="1rem")
+
+    # Flow pass/fail
+    flow_val = scene_row.get("max_flow")
+    flow_pass = not above(flow_val, FLOW_THRESHOLD)
+    flow_color = "#22c55e" if flow_pass else "#ef4444"
+    flow_label = "PASS" if flow_pass else "FAIL"
+    if flow_val is None or pd.isna(flow_val):
+        flow_color = "var(--textColor)"
+        flow_label = "N/A"
+
+    # SSIM pass/fail
+    ssim_val = scene_row.get("min_ssim")
+    ssim_pass = not below(ssim_val, SSIM_THRESHOLD)
+    ssim_color = "#22c55e" if ssim_pass else "#ef4444"
+    ssim_label = "PASS" if ssim_pass else "FAIL"
+    if ssim_val is None or pd.isna(ssim_val):
+        ssim_color = "var(--textColor)"
+        ssim_label = "N/A"
+
+    # Delta E
+    de_val = scene_row.get("mean_deltaE_after")
+
+    # Quality score
+    qs_val = scene_row.get("quality_score")
+    
+    scorecard_html = (
+        f'<div class="metric-grid-4">'
+        f'<div class="scorecard-card">'
+        f'<div class="scorecard-title">Flow ROI p90</div>'
+        f'<div class="scorecard-value">{format_num(flow_val)}</div>'
+        f'<div class="scorecard-status" style="color: {flow_color};">{flow_label}</div>'
+        f'</div>'
+        f'<div class="scorecard-card">'
+        f'<div class="scorecard-title">Min SSIM</div>'
+        f'<div class="scorecard-value">{format_num(ssim_val, 3)}</div>'
+        f'<div class="scorecard-status" style="color: {ssim_color};">{ssim_label}</div>'
+        f'</div>'
+        f'<div class="scorecard-card">'
+        f'<div class="scorecard-title">Mean Delta E</div>'
+        f'<div class="scorecard-value">{format_num(de_val)}</div>'
+        f'<div class="scorecard-status" style="color: var(--textColor); opacity: 0.5;">LOWER IS BETTER</div>'
+        f'</div>'
+        f'<div class="scorecard-card">'
+        f'<div class="scorecard-title">Quality Score</div>'
+        f'<div class="scorecard-value">{format_num(qs_val, 1)}</div>'
+        f'<div class="scorecard-status" style="color: var(--textColor); opacity: 0.5;">HIGHER IS WORSE</div>'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(scorecard_html, unsafe_allow_html=True)
+
+    # ---- Laplacian Deltas ----
+    lap_deltas = compute_laplacian_deltas(selection_row, ois_df, nonois_df)
+    delta_html_parts = []
+    for cam_key, cam_label in [("ois", "OIS"), ("nonois", "Non-OIS")]:
+        d = lap_deltas[cam_key]
+        sharp_s = format_num(d["sharp"], 1) if d["sharp"] is not None else "-"
+        blur_s = format_num(d["blur"], 1) if d["blur"] is not None else "-"
+        delta_s = format_num(d["delta"], 1) if d["delta"] is not None else "-"
+        delta_color = "#22c55e" if d["delta"] is not None and d["delta"] > 0 else "#ef4444" if d["delta"] is not None else "var(--textColor)"
+        
+        delta_html_parts.append(
+            f'<div class="scorecard-card">'
+            f'<div class="scorecard-title">{cam_label} Laplacian Delta</div>'
+            f'<div style="font-size: 0.95rem; margin-top: 0.2rem; color: var(--textColor);">'
+            f'Sharp: <b>{sharp_s}</b> &rarr; Blur: <b>{blur_s}</b> = <span style="color: {delta_color}; font-weight: 800;">&Delta;{delta_s}</span>'
+            f'</div>'
+            f'</div>'
+        )
+    st.markdown(f'<div class="metric-grid-2">{"".join(delta_html_parts)}</div>', unsafe_allow_html=True)
+
+    # ---- Alignment Confidence ----
+    geo_scene_data = logs["geo"][logs["geo"]["scene"] == scene] if "scene" in logs["geo"].columns else pd.DataFrame()
+    if not geo_scene_data.empty and "inlier_ratio" in geo_scene_data.columns:
+        avg_inlier = geo_scene_data["inlier_ratio"].mean()
+        inlier_pct = f"{avg_inlier * 100:.1f}%" if not pd.isna(avg_inlier) else "-"
+        inlier_color = "#22c55e" if avg_inlier and avg_inlier > 0.5 else "#f59e0b"
+        st.markdown(
+            f'<div class="scorecard-card" style="margin-bottom: 1rem;">'
+            f'<div class="scorecard-title">Alignment Confidence</div>'
+            f'<div style="font-size: 1.1rem; font-weight: 700; color: {inlier_color};">{inlier_pct} avg inlier ratio</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    scene_tabs = st.tabs(["Overview", "Laplacian", "Alignment + Interpolation", "Scene Logs & History"])
+
+    with scene_tabs[0]:
+        render_asset_metrics(asset_status)
+        
+        capture_num = extract_capture_number(capture)
+        fallback_used = bool_label(scene_row.get("nonois_used_fallback"))
+        linear_scene = bool_label(scene_row.get("is_linear_scene"))
+
+        info_html = (
+            f'<div class="metric-grid-4">'
+            f'<div class="scorecard-card">'
+            f'<div class="scorecard-title">Capture #</div>'
+            f'<div class="scorecard-value" style="font-size: 1.4rem;">{capture_num}</div>'
+            f'</div>'
+            f'<div class="scorecard-card">'
+            f'<div class="scorecard-title">Fallback Used</div>'
+            f'<div class="scorecard-value" style="font-size: 1.4rem;">{fallback_used}</div>'
+            f'</div>'
+            f'<div class="scorecard-card">'
+            f'<div class="scorecard-title">Linear Scene</div>'
+            f'<div class="scorecard-value" style="font-size: 1.4rem;">{linear_scene}</div>'
+            f'</div>'
+            f'</div>'
+        )
+        st.markdown(info_html, unsafe_allow_html=True)
+        
+        # ---- Scene Data Management (Overrides) ----
+        section_header("Manage Scene Data", level="h4")
+        m_col1, m_col2 = st.columns(2)
+        with m_col1:
+            current_split = scene_row["split"]
+            split_idx = SPLIT_OPTIONS.index(current_split) if current_split in SPLIT_OPTIONS else 0
+            new_split = st.selectbox(
+                "Assign to Split", 
+                options=SPLIT_OPTIONS, 
+                index=split_idx,
+                key=f"split_move_{scene}"
             )
+            if st.button("Apply Split Change", key=f"btn_split_{scene}"):
+                if new_split != scene_row["split"]:
+                    save_override(scene, "split", scene_row["split"], new_split)
+                    load_all_logs.clear()
+                    st.session_state["review_notice"] = {"msg": f"Assigned {scene_row['scene_name']} to {new_split}!", "type": "info"}
+                    st.rerun()
 
-        summary_df = pd.DataFrame(summary_rows)
-        st.dataframe(summary_df, use_container_width=True)
+        with m_col2:
+            method_opts = ["HandShake Method", "Sliding Method", "Vibration Method"]
+            
+            # Gracefully map existing raw methods to the clean UI options
+            raw_method = str(scene_row["method"])
+            curr_mapped = raw_method
+            if "handshake" in raw_method.lower():
+                curr_mapped = "HandShake Method"
+            elif "sliding" in raw_method.lower():
+                curr_mapped = "Sliding Method"
+            elif "vibration" in raw_method.lower():
+                curr_mapped = "Vibration Method"
+                
+            new_method = st.selectbox(
+                "Change Method", 
+                options=method_opts, 
+                index=method_opts.index(curr_mapped) if curr_mapped in method_opts else 0,
+                key=f"method_move_{scene}"
+            )
+            if st.button("Apply Method Change", key=f"btn_method_{scene}"):
+                if new_method != curr_mapped:
+                    save_override(scene, "method", raw_method, new_method)
+                    load_all_logs.clear()
+                    st.session_state["review_notice"] = {"msg": f"Changed {scene_row['scene_name']} method to {new_method}!", "type": "info"}
+                    st.rerun()
 
-        # Detailed per-capture expanders with laplacian plots and selected-frame markers
-        for cap in captures:
-            cap_label = extract_capture_number(cap)
-            with st.expander(f"Capture {cap_label}", expanded=(cap == str(capture))):
+        selection_table = build_selection_table(selection_row)
+        if not selection_table.empty:
+            section_header("Selected Frames", level="h4")
+            st.dataframe(selection_table, use_container_width=True, hide_index=True)
+
+        render_scene_image_grid("Final Dataset", DATASET_256, scene, selection_row)
+
+    with scene_tabs[2]:
+        render_scene_image_grid("Aligned Outputs", ALIGNED_COLOR, scene, selection_row)
+        render_scene_image_grid("Interpolated 256 Outputs", DATASET_256, scene, selection_row)
+
+    with scene_tabs[1]:
+        selection_df = logs.get("selection", pd.DataFrame())
+
+        captures = []
+        for name in ("selection", "geo", "photo", "color", "interpolation"):
+            df = logs.get(name, pd.DataFrame())
+            if not df.empty and "scene" in df.columns and "capture" in df.columns:
+                caps = df[df["scene"] == scene]["capture"].dropna().astype(str).unique().tolist()
+                captures.extend(caps)
+
+        if not captures and capture is not None and not pd.isna(capture):
+            captures = [str(capture)]
+
+        captures = sorted({str(c) for c in captures})
+
+        if not captures:
+            st.info("No laplacian captures found for this scene.")
+        else:
+            section_header("Capture Summary", level="h4", top_margin="0rem")
+
+            summary_rows = []
+            for cap in captures:
                 sel_rows = (
                     selection_df[(selection_df.get("scene") == scene) & (selection_df.get("capture") == cap)]
                     if not selection_df.empty
                     else pd.DataFrame()
                 )
                 sel = sel_rows.iloc[0] if not sel_rows.empty else None
-
                 ois = load_laplacian(cap, "ois")
                 nonois = load_laplacian(cap, "nonois")
 
-                cols = st.columns(3)
-                cols[0].metric("Fallback Used", bool_label(sel.get("nonois_used_fallback")) if sel is not None else "-")
-                cols[1].metric("Linear Scene", bool_label(sel.get("is_linear_scene")) if sel is not None else "-")
-                cols[2].metric("Selection Ready", "Yes" if ois is not None and nonois is not None else "Partial")
-
-                frame_tabs = st.tabs(["OIS Frames", "Non-OIS Frames"])
-                with frame_tabs[0]:
-                    render_selected_frames(cap, "ois", ois, sel)
-                with frame_tabs[1]:
-                    render_selected_frames(cap, "nonois", nonois, sel)
-
-                render_debug_image(
-                    "Laplacian Debug Composite",
-                    resolve_laplacian_debug(scene),
-                    "No laplacian debug image found for this scene.",
+                summary_rows.append(
+                    {
+                        "Capture": extract_capture_number(cap),
+                        "Fallback": bool_label(sel.get("nonois_used_fallback")) if sel is not None else "-",
+                        "Linear": bool_label(sel.get("is_linear_scene")) if sel is not None else "-",
+                        "Ready": "Yes" if ois is not None and nonois is not None else "Partial",
+                        "OIS Sharp Frame": frame_value(sel, "ois_sharp") if sel is not None else "",
+                        "OIS Drop (Actual)": frame_value(sel, "ois_drop_frame_actual") if sel is not None else "",
+                        "OIS Blur Frame": frame_value(sel, "ois_blur") if sel is not None else "",
+                        "Non-OIS Sharp Frame": frame_value(sel, "nonois_sharp") if sel is not None else "",
+                        "Non-OIS Drop (Actual)": frame_value(sel, "nonois_drop_frame_actual") if sel is not None else "",
+                        "Non-OIS Drop (Fallback)": frame_value(sel, "nonois_drop_frame") if sel is not None else "",
+                        "Non-OIS Blur Frame": frame_value(sel, "nonois_blur") if sel is not None else "",
+                    }
                 )
 
-                plot_cols = st.columns(2)
-                with plot_cols[0]:
-                    plot_laplacian(
-                        ois,
-                        "OIS Laplacian Curve",
-                        [
-                            ("Sharp", frame_value(sel, "ois_sharp"), "#16a34a"),
-                            ("Drop Actual", frame_value(sel, "ois_drop_frame_actual"), "#d97706"),
-                            ("Drop Fallback", frame_value(sel, "ois_drop_frame"), "#f97316"),
-                            ("Blur", frame_value(sel, "ois_blur"), "#dc2626"),
-                        ],
+            summary_df = pd.DataFrame(summary_rows)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+            for cap in captures:
+                cap_label = extract_capture_number(cap)
+                with st.expander(f"Capture {cap_label}", expanded=(cap == str(capture))):
+                    sel_rows = (
+                        selection_df[(selection_df.get("scene") == scene) & (selection_df.get("capture") == cap)]
+                        if not selection_df.empty
+                        else pd.DataFrame()
                     )
-                with plot_cols[1]:
-                    plot_laplacian(
-                        nonois,
-                        "Non-OIS Laplacian Curve",
-                        [
-                            ("Sharp", frame_value(sel, "nonois_sharp"), "#16a34a"),
-                            ("Drop Actual", frame_value(sel, "nonois_drop_frame_actual"), "#d97706"),
-                            ("Drop Fallback", frame_value(sel, "nonois_drop_frame"), "#f97316"),
-                            ("Blur", frame_value(sel, "nonois_blur"), "#dc2626"),
-                        ],
+                    sel = sel_rows.iloc[0] if not sel_rows.empty else None
+
+                    ois = load_laplacian(cap, "ois")
+                    nonois = load_laplacian(cap, "nonois")
+
+                    cols = st.columns(3)
+                    cols[0].metric("Fallback Used", bool_label(sel.get("nonois_used_fallback")) if sel is not None else "-")
+                    cols[1].metric("Linear Scene", bool_label(sel.get("is_linear_scene")) if sel is not None else "-")
+                    cols[2].metric("Selection Ready", "Yes" if ois is not None and nonois is not None else "Partial")
+
+                    frame_tabs = st.tabs(["OIS Frames", "Non-OIS Frames"])
+                    with frame_tabs[0]:
+                        render_selected_frames(cap, "ois", ois, sel)
+                    with frame_tabs[1]:
+                        render_selected_frames(cap, "nonois", nonois, sel)
+
+                    # Add clear vertical spacing between frames and graphs
+                    st.markdown("<br><br>", unsafe_allow_html=True)
+
+                    plot_cols = st.columns(2)
+                    with plot_cols[0]:
+                        plot_laplacian(
+                            ois,
+                            "OIS Laplacian Curve",
+                            [
+                                ("Sharp", frame_value(sel, "ois_sharp"), "#16a34a"),
+                                ("Drop", frame_value(sel, "ois_drop_frame_actual"), "#d97706"),
+                                ("Blur", frame_value(sel, "ois_blur"), "#dc2626"),
+                            ],
+                        )
+                    with plot_cols[1]:
+                        plot_laplacian(
+                            nonois,
+                            "Non-OIS Laplacian Curve",
+                            [
+                                ("Sharp", frame_value(sel, "nonois_sharp"), "#16a34a"),
+                                ("Drop Actual", frame_value(sel, "nonois_drop_frame_actual"), "#ea580c"),
+                                ("Drop Fallback", frame_value(sel, "nonois_drop_frame"), "#f97316"),
+                                ("Blur", frame_value(sel, "nonois_blur"), "#dc2626"),
+                            ],
+                        )
+
+                    section_header("Selected Frame Scores", level="h4")
+                    st.dataframe(
+                        build_laplacian_score_table(sel, ois, nonois),
+                        use_container_width=True,
+                        hide_index=True
                     )
 
-                st.subheader("Selected Frame Scores")
-                st.dataframe(
-                    build_laplacian_score_table(sel, ois, nonois),
-                    use_container_width=True,
-                )
+    with scene_tabs[3]:
+        log_tabs = st.tabs(["Geo", "Photo", "Color", "Interpolation", "Failures", "Review History"])
 
-with tabs[3]:
-    log_tabs = st.tabs(["Geo", "Photo", "Color", "Interpolation", "Failures", "Review"])
+        with log_tabs[0]:
+            render_dataframe(geo_scene, "No geo log rows for this scene.")
+        with log_tabs[1]:
+            render_dataframe(photo_scene, "No photo log rows for this scene.")
+        with log_tabs[2]:
+            render_dataframe(color_scene, "No color log rows for this scene.")
+        with log_tabs[3]:
+            render_dataframe(interp_scene, "No interpolation log rows for this scene.")
+        with log_tabs[4]:
+            if fail_scene.empty:
+                st.info("No scene failures recorded for this scene.")
+            else:
+                render_dataframe(fail_scene, "")
+                section_header("Parsed Failure Details", level="h4")
+                parsed_rows = []
+                for _, frow in fail_scene.iterrows():
+                    details = parse_failed_images_detail(frow.get("failed_images"))
+                    for d in details:
+                        parsed_rows.append(d)
+                if parsed_rows:
+                    parsed_df = pd.DataFrame(parsed_rows)
+                    badge_parts = []
+                    for _, pr in parsed_df.iterrows():
+                        phase = pr["phase"]
+                        tone = "bad" if phase == "geo" else "warn" if phase == "ssim" else "muted"
+                        detail_str = f' <span style="opacity:0.6;">({html.escape(pr["detail"])})</span>' if pr["detail"] else ""
+                        badge_parts.append(
+                            f'<tr>'
+                            f'<td style="padding: 0.4rem 0.8rem;">{html.escape(pr["image"])}</td>'
+                            f'<td style="padding: 0.4rem 0.8rem;">{tag_html(phase, tone)}</td>'
+                            f'<td style="padding: 0.4rem 0.8rem;">{detail_str}</td>'
+                            f'</tr>'
+                        )
+                    st.markdown(
+                        '<table style="width:100%; border-collapse: collapse;">'
+                        '<tr style="border-bottom: 1px solid rgba(128,128,128,0.2);">'
+                        '<th style="text-align:left; padding: 0.4rem 0.8rem; font-size: 0.8rem; text-transform: uppercase; opacity: 0.6;">Image</th>'
+                        '<th style="text-align:left; padding: 0.4rem 0.8rem; font-size: 0.8rem; text-transform: uppercase; opacity: 0.6;">Phase</th>'
+                        '<th style="text-align:left; padding: 0.4rem 0.8rem; font-size: 0.8rem; text-transform: uppercase; opacity: 0.6;">Detail</th>'
+                        '</tr>'
+                        + "".join(badge_parts) +
+                        '</table>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info("No parseable failure details.")
+        
+        with log_tabs[5]:
+            section_header("Scene Review History", level="h4")
+            
+            if review_scene.empty:
+                st.info("No manual review history for this scene yet.")
+            else:
+                st.markdown('<div style="margin-bottom:1rem;"></div>', unsafe_allow_html=True)
+                
+                hcols = st.columns([2, 7, 2])
+                hcols[0].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Decision</div>", unsafe_allow_html=True)
+                hcols[1].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Note</div>", unsafe_allow_html=True)
+                hcols[2].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Action</div>", unsafe_allow_html=True)
+                st.markdown("<hr style='margin: 0.5rem 0 0.5rem 0; border-color: rgba(128,128,128,0.2);'>", unsafe_allow_html=True)
+                
+                for global_idx, row in review_scene.iterrows():
+                    row_cols = st.columns([2, 7, 2], vertical_alignment="center")
+                    
+                    with row_cols[0]:
+                        st.markdown(f"<div style='font-weight: 700; font-size: 0.95rem;'>{row['label']}</div>", unsafe_allow_html=True)
+                    
+                    with row_cols[1]:
+                        note_text = row.get("note", "")
+                        if pd.notna(note_text) and note_text:
+                            st.markdown(f"<div style='font-size: 0.95rem;'>{html.escape(str(note_text))}</div>", unsafe_allow_html=True)
+                        else:
+                            st.markdown("<div style='opacity: 0.5; font-style: italic; font-size: 0.95rem;'>No note provided</div>", unsafe_allow_html=True)
+                    
+                    with row_cols[2]:
+                        if st.button("Delete", key=f"del_row_{global_idx}", use_container_width=True):
+                            delete_review_row(scene, global_idx)
+                            load_all_logs.clear()
+                            st.session_state["review_notice"] = {"msg": "Deleted a review record.", "type": "info"}
+                            st.rerun()
+                            
+                    st.markdown("<hr style='margin: 0.2rem 0; border-color: rgba(128,128,128,0.1);'>", unsafe_allow_html=True)
+                
+                st.write("")
+                if st.button("Clear Scene History", type="secondary"):
+                    clear_scene_review(scene)
+                    load_all_logs.clear()
+                    st.session_state["review_notice"] = {"msg": f"Cleared all review history for {scene_row['scene_name']}.", "type": "info"}
+                    st.rerun()
 
-    with log_tabs[0]:
-        render_dataframe(geo_scene, "No geo log rows for this scene.")
-    with log_tabs[1]:
-        render_dataframe(photo_scene, "No photo log rows for this scene.")
-    with log_tabs[2]:
-        render_dataframe(color_scene, "No color log rows for this scene.")
-    with log_tabs[3]:
-        render_dataframe(interp_scene, "No interpolation log rows for this scene.")
-    with log_tabs[4]:
-        render_dataframe(fail_scene, "No scene failures recorded for this scene.")
-    with log_tabs[5]:
-        st.subheader("Manual Review")
+# ======================================================================================
+# TAB 2: DATA MANAGEMENT & HISTORY
+# ======================================================================================
+with main_tabs[1]:
+    section_header("Global Review History", level="h3", top_margin="0rem")
+    st.markdown("Overview of all manually reviewed scenes across the entire dataset.")
 
-        note = st.text_input("Optional Note")
-
-        review_cols = st.columns(3)
-
-        if review_cols[0].button("KEEP", use_container_width=True):
-            save_review(scene, "KEEP", note)
+    full_review_df = logs.get("review", pd.DataFrame())
+    
+    if full_review_df.empty:
+        st.info("No global manual review history found.")
+    else:
+        # Display the global dataframe
+        st.dataframe(full_review_df, use_container_width=True, hide_index=True)
+        
+        st.write("")
+        st.warning("Warning: This action deletes all review decisions across the entire workspace.")
+        if st.button("Clear ALL Global Review History", type="primary"):
+            clear_all_global_reviews()
             load_all_logs.clear()
-            st.session_state["review_notice"] = f"Saved KEEP for {scene}."
+            st.session_state["review_notice"] = {"msg": "Completely cleared all global review history.", "type": "info"}
             st.rerun()
 
-        if review_cols[1].button("REJECT", use_container_width=True):
-            save_review(scene, "REJECT", note)
+    section_header("Scene Overrides & Data Management", level="h3")
+    st.markdown("Use this section to view or automatically fix scene categorizations (splits & methods) without touching the original workspace files.")
+
+    section_header("Auto-Fix Methods Based on Linear Motion", level="h4")
+    st.markdown(
+        "Scans all scenes. If a `HandShake Method` scene HAS linear motion, it will be logically moved to `Sliding Method`. "
+        "If a `Sliding Method` scene has NO linear motion, it will be logically moved to `HandShake Method`."
+    )
+    if st.button("Auto-Fix Misclassified Methods", type="primary"):
+        fixes_applied = 0
+        for _, row in summary.iterrows():
+            method = str(row["method"]).lower()
+            is_linear = as_bool(row.get("is_linear_scene"))
+            scene_id = row["scene"]
+            
+            # Using 'in' instead of '==' to catch variations like "handshake_1" or "sliding_test"
+            if is_linear is True and "handshake" in method:
+                save_override(scene_id, "method", row["method"], "Sliding Method")
+                fixes_applied += 1
+            elif is_linear is False and "sliding" in method:
+                save_override(scene_id, "method", row["method"], "HandShake Method")
+                fixes_applied += 1
+                
+        if fixes_applied > 0:
             load_all_logs.clear()
-            st.session_state["review_notice"] = f"Saved REJECT for {scene}."
+            st.success(f"Successfully auto-fixed and logically moved {fixes_applied} scenes to their correct methods!")
+            st.rerun()
+        else:
+            st.info("All scenes are already correctly mapped based on their linear motion characteristic.")
+
+    section_header("Batch Split Assignment", level="h4")
+    st.markdown(
+        "Assign a dataset split (Training, Validation, Testing) to multiple scenes at once. "
+        "Filter by method and/or current split to target specific groups."
+    )
+    batch_cols = st.columns(3)
+    with batch_cols[0]:
+        batch_method_filter = st.selectbox(
+            "Filter by Method",
+            options=["All Methods"] + sorted(summary["method"].dropna().unique().tolist()),
+            key="batch_method_filter"
+        )
+    with batch_cols[1]:
+        batch_current_split = st.selectbox(
+            "Filter by Current Split",
+            options=["All Splits"] + SPLIT_OPTIONS,
+            key="batch_current_split"
+        )
+    with batch_cols[2]:
+        batch_target_split = st.selectbox(
+            "Assign to Split",
+            options=SPLIT_OPTIONS,
+            key="batch_target_split"
+        )
+
+    batch_target = summary.copy()
+    if batch_method_filter != "All Methods":
+        batch_target = batch_target[batch_target["method"] == batch_method_filter]
+    if batch_current_split != "All Splits":
+        batch_target = batch_target[batch_target["split"] == batch_current_split]
+
+    batch_count = len(batch_target)
+    st.caption(f"{batch_count} scene(s) match the filter criteria.")
+
+    if st.button(f"Assign {batch_count} scenes to '{batch_target_split}'", disabled=batch_count == 0):
+        applied = 0
+        for _, row in batch_target.iterrows():
+            if row["split"] != batch_target_split:
+                save_override(row["scene"], "split", row["split"], batch_target_split)
+                applied += 1
+        if applied > 0:
+            load_all_logs.clear()
+            st.success(f"Assigned {applied} scene(s) to '{batch_target_split}'!")
+            st.rerun()
+        else:
+            st.info("All matching scenes already have the selected split.")
+
+    st.write("")
+    section_header("Manual Overrides History", level="h4")
+    st.markdown("These overrides are applied dynamically and determine the final structure exported in the Export Tab.")
+    
+    overrides_df = load_overrides()
+    if overrides_df.empty:
+        st.info("No manual overrides applied yet.")
+    else:
+        st.dataframe(overrides_df.sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
+        if st.button("Clear All Overrides", type="secondary"):
+            if OVERRIDES_CSV.exists():
+                OVERRIDES_CSV.unlink()
+            load_all_logs.clear()
+            st.success("Cleared all manual dataset overrides.")
             st.rerun()
 
-        if review_cols[2].button("FLAG", use_container_width=True):
-            save_review(scene, "FLAG", note)
-            load_all_logs.clear()
-            st.session_state["review_notice"] = f"Saved FLAG for {scene}."
-            st.rerun()
 
-        render_dataframe(review_scene, "No manual review history for this scene yet.")
+# ======================================================================================
+# TAB 3: EXPORT DATASET
+# ======================================================================================
+with main_tabs[2]:
+    section_header("Export Reviewed Dataset", level="h3", top_margin="0rem")
+    st.markdown(
+        "Export all **KEEP**-reviewed scenes that have an assigned split (Training, Validation, or Testing) "
+        "into the final folder structure. Source images come from 256×256 interpolated final output.\n\n"
+        "Scenes marked as **Unassigned** will not be exported. Use the Scene Inspector to assign splits first."
+    )
 
+    # Gather all KEEP scenes from the full summary (not just filtered)
+    keep_scenes = summary[summary["review_status"] == "KEEP"].copy()
+    total_keep = len(keep_scenes)
+    exportable = keep_scenes[keep_scenes["split"] != "Unassigned"]
+    total_exportable = len(exportable)
+    unassigned_keep = total_keep - total_exportable
+
+    if total_keep == 0:
+        st.warning("No scenes have been marked as KEEP yet. Review scenes first.")
+    elif total_exportable == 0:
+        st.warning(f"{total_keep} KEEP scenes found, but none have an assigned split. Use the Scene Inspector to assign Training/Validation/Testing.")
+    else:
+        # Summary by split
+        section_header("Scenes to Export", level="h4")
+        split_summary = keep_scenes.groupby("split").agg(
+            count=("scene", "size"),
+            methods=("method", lambda x: ", ".join(sorted(x.unique()))),
+        ).reset_index()
+        split_summary.columns = ["Split", "Scenes", "Methods"]
+        st.dataframe(split_summary, use_container_width=True, hide_index=True)
+
+        # Preview table
+        if unassigned_keep > 0:
+            st.info(f"{unassigned_keep} KEEP scene(s) have no split assigned and will be skipped during export.")
+
+        with st.expander(f"Preview all {total_exportable} exportable KEEP scenes", expanded=False):
+            preview_rows = []
+            for split_label in sorted(exportable["split"].unique()):
+                split_key = SPLIT_EXPORT_MAP.get(split_label, split_label.lower())
+                split_scenes_sorted = exportable[exportable["split"] == split_label].sort_values("scene_number")
+                for idx, (_, row) in enumerate(split_scenes_sorted.iterrows(), start=1):
+                    preview_rows.append({
+                        "Number": f"{idx:03d}",
+                        "Split": split_key,
+                        "Scene": row["scene_name"],
+                        "Method": row["method"],
+                        "Quality Score": format_num(row.get("quality_score"), 1),
+                        "Flow p90": format_num(row.get("max_flow")),
+                        "Min SSIM": format_num(row.get("min_ssim"), 3),
+                    })
+            st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+
+        section_header("Output Structure", level="h4")
+        st.code(
+            "dataset_ois/\n"
+            "├── train/\n"
+            "│   ├── input/   ← ois_blur.jpg (001.jpg, 002.jpg, ...)\n"
+            "│   └── target/  ← ois_sharp.jpg (001.jpg, 002.jpg, ...)\n"
+            "├── val/\n"
+            "└── test/\n"
+            "\n"
+            "dataset_nonois/\n"
+            "├── train/\n"
+            "│   ├── input/   ← nonois_blur.jpg\n"
+            "│   └── target/  ← nonois_sharp.jpg\n"
+            "├── val/\n"
+            "└── test/",
+            language="text",
+        )
+
+        export_path = EXPORT_ROOT
+        st.caption(f"Export location: `{export_path.resolve()}`")
+
+        # Check for existing export
+        ois_exists = (export_path / "dataset_ois").exists()
+        nonois_exists = (export_path / "dataset_nonois").exists()
+        if ois_exists or nonois_exists:
+            st.warning("Previous export detected. Exporting again will overwrite existing files.")
+
+        exp_cols = st.columns([1, 1, 2])
+        with exp_cols[0]:
+            if st.button("Export Dataset", use_container_width=True, type="primary", disabled=total_exportable == 0):
+                with st.spinner("Exporting dataset..."):
+                    progress = st.progress(0, text="Starting export...")
+                    try:
+                        manifest_df = export_dataset(exportable, DATASET_256, export_path)
+                        progress.progress(100, text="Export complete!")
+                        st.session_state["last_export_manifest"] = manifest_df
+                        st.session_state["last_export_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.success(f"Exported {total_exportable} scenes ({len(manifest_df)} files) successfully! Log saved to logs/dataset_export_log.csv")
+                    except Exception as e:
+                        st.error(f"Export failed: {e}")
+
+        # Show last export manifest
+        if "last_export_manifest" in st.session_state:
+            st.markdown(f"**Last export**: {st.session_state.get('last_export_time', '-')}")
+            with st.expander("View Dataset Export Log", expanded=False):
+                st.dataframe(st.session_state["last_export_manifest"], use_container_width=True, hide_index=True)

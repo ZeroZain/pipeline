@@ -129,28 +129,30 @@ Avoid:
 
 ---
 
-### 3. Create Target Folder Structure
+### 3. Google Drive Folder Structure
+
+The Google Drive folder structure is flat — organized only by capture method, with no dataset split folders:
 
 ```text
 My Drive/
   Thesis or Crisis/
     Videos/
       Dataset Capture/
-        ├── Training Set/
-        │     ├── HandShake Method/
-        │     ├── Sliding Method/
-        │     └── Vibration Method/
-        │
-        ├── Validation Set/
-        │     ├── HandShake Method/
-        │     ├── Sliding Method/
-        │     └── Vibration Method/
-        │
-        └── Testing Set/
-              ├── HandShake Method/
-              ├── Sliding Method/
-              └── Vibration Method/
+        ├── HandShake Method/
+        │     └── capture_xxx/
+        │           ├── ois/
+        │           └── nonois/
+        ├── Sliding Method/
+        │     └── capture_xxx/
+        │           ├── ois/
+        │           └── nonois/
+        └── Vibration Method/
+              └── capture_xxx/
+                    ├── ois/
+                    └── nonois/
 ```
+
+There are no `Training Set`, `Validation Set`, or `Testing Set` folders. Dataset split categorization is handled later in the dashboard.
 
 ---
 
@@ -243,17 +245,26 @@ python scripts/CaptureSync/capture_sync.py
 
 ---
 
-### 4. Select Dataset
+### 4. Configure Start Index Per Method
+
+The script prompts for a starting capture index for each method:
 
 ```text
-Dataset (training/validation/testing):
+--- Capture Start Index Configuration ---
+For each method, enter the desired starting capture index.
+The script will skip to the next available index if existing captures are found.
+
+  [HandShake Method] Existing captures detected (up to capture_009)
+  Start index for HandShake Method (default 10):
+  Start index for Sliding Method (default 1):
+  Start index for Vibration Method (default 1):
 ```
 
-Mapped to:
+Features:
 
-* training → Training Set
-* validation → Validation Set
-* testing → Testing Set
+* Scans existing captures in Google Drive to detect the max index per method
+* Default value is `existing_max + 1` (press Enter to accept)
+* If the requested index conflicts with existing captures, the script auto-advances to prevent overwriting and warns you
 
 ---
 
@@ -263,7 +274,7 @@ The script will:
 
 * Validate folder names
 * Match pairs using time tolerance
-* Assign method (handshake → sliding → vibration)
+* Assign method (handshake → sliding → vibration, round-robin)
 * Create `capture_xxx` folders
 * Move folders into Google Drive structure
 * Sync automatically
@@ -273,7 +284,7 @@ The script will:
 ## Processing Logic
 
 ```text
-{Drive}/{Dataset Set}/{Method Name}/capture_xxx/
+{Drive}/{Method Name}/capture_xxx/
 ```
 
 Structure:
@@ -319,21 +330,21 @@ Contains:
 * matched pairs
 * skipped entries
 * errors
+* start index decisions per method
 
 ---
 
 ## Output Example
 
 ```text
-Training Set/
-  HandShake Method/
-    capture_010/
-      ├── ois/
-      │    └── 260403_201606_VIDEO_26mm/
-      │         └── file.zip
-      └── nonois/
-           └── 260403_201607_VIDEO_25mm/
-                └── file.zip
+HandShake Method/
+  capture_010/
+    ├── ois/
+    │    └── 260403_201606_VIDEO_26mm/
+    │         └── file.zip
+    └── nonois/
+         └── 260403_201607_VIDEO_25mm/
+              └── file.zip
 ```
 
 ---

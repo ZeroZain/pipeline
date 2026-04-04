@@ -25,23 +25,36 @@ This ensures that interpolation is applied only to **fully aligned and color-cor
 
 # 1. Project Folder Structure
 
-The interpolation script expects the **output of the alignment pipeline**.
+The interpolation script expects the **output of the alignment pipeline**, organized by capture method:
 
 ```
-your_project/
-│
-├── interpolation_stage.py
-├── logs/
-│   └── interpolation_log.csv    (auto-created)
-├── aligned/
-│   └── gt_ois/
-│       └── color/
-│           ├── scene_001/
-│           │   ├── ois_sharp.jpg
-│           │   └── ...
-│
-└── dataset_256/                 (auto-created)
+workspace/
+  data/
+    aligned/
+      gt_ois/
+        color/
+          HandShake Method/
+            scene_001/
+              ois_sharp.jpg
+              ois_blur.jpg
+              nonois_sharp.jpg
+              nonois_blur.jpg
+          Sliding Method/
+            scene_002/
+              ...
+          Vibration Method/
+            scene_003/
+              ...
 
+    dataset_256/                 (auto-created)
+      gt_ois/
+        HandShake Method/
+          scene_001/
+            ...
+        Sliding Method/
+          ...
+        Vibration Method/
+          ...
 ```
 
 ---
@@ -65,7 +78,7 @@ pip install opencv-python numpy tqdm
 
 # 3. Selecting Ground Truth Source
 
-Inside `interpolation_stage.py`, locate:
+Inside `n256.py`, locate:
 
 ```python
 GT_SOURCE = "ois"
@@ -126,7 +139,7 @@ The script uses a dynamic progress bar (`tqdm`) to monitor the status:
 
 # 8. Log File Management
 
-Logs are saved to `logs/interpolation_log.csv`.
+Logs are saved to `workspace/logs/interpolation_log.csv`.
 
 **Update Behavior:** The script now **appends** to the log. This ensures that if you process half of your dataset today and the other half tomorrow, the log file will contain the history of both sessions.
 

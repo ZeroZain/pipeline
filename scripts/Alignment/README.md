@@ -26,35 +26,28 @@ Each stage:
 * logs results independently
 * uses the previous stage output
 
-Intermediate folders are automatically removed after processing to save storage.
-
 ---
 
 # 1. Project Folder Structure
 
-Your project must look like this:
+The alignment script reads from the dataset folder which is organized by capture method:
 
 ```
-your_project/
-│
-├── pipeline_runner.py
-│
-├── dataset/
-│   ├── scene_001/
-│   │   ├── ois_sharp.dng
-│   │   ├── ois_blur.dng
-│   │   ├── nonois_sharp.dng
-│   │   ├── nonois_blur.dng
-│   │
-│   ├── scene_002/
-│   │   ├── ois_sharp.dng
-│   │   ├── ois_blur.dng
-│   │   ├── nonois_sharp.dng
-│   │   ├── nonois_blur.dng
-│   │
-│   └── ...
-│
-└── aligned/   (auto-created)
+workspace/
+  data/
+    dataset/
+      HandShake Method/
+        scene_001/
+          ois_sharp.dng
+          ois_blur.dng
+          nonois_sharp.dng
+          nonois_blur.dng
+      Sliding Method/
+        scene_002/
+          ...
+      Vibration Method/
+        scene_003/
+          ...
 ```
 
 Important rules:
@@ -103,7 +96,7 @@ Library purposes:
 
 # 3. Selecting the Ground Truth
 
-Open `pipeline_runner.py`.
+Open `align4.py`.
 
 Find this line:
 
@@ -139,7 +132,7 @@ Only one can be active per run.
 From the project root directory:
 
 ```
-python pipeline_runner.py
+python scripts/Alignment/align4.py
 ```
 
 The script automatically:
@@ -152,9 +145,14 @@ The script automatically:
 6. performs color normalization
 7. computes validation metrics
 8. saves aligned images
-9. deletes intermediate folders
 
 No manual scene selection is required.
+
+To also run interpolation after alignment:
+
+```
+python scripts/Alignment/align4.py --run-next
+```
 
 ---
 
@@ -168,21 +166,16 @@ Align spatial position of the image to the ground truth.
 
 Method:
 
-* ORB feature detection
+* SIFT feature detection
 * feature matching
-* RANSAC affine transform
+* RANSAC homography / partial affine / ECC affine
 * residual optical flow validation
+* chain alignment via non-OIS anchor
 
 Validation checks:
 
 * feature inlier ratio
-* residual optical flow magnitude
-
-Output folder during processing:
-
-```
-aligned/gt_ois/geo/scene_x/
-```
+* residual optical flow magnitude (ROI p90)
 
 ---
 
@@ -197,24 +190,12 @@ Method:
 Linear intensity normalization:
 
 ```
-gain + bias adjustment
+channel-wise mean shift
 ```
 
 Validation:
 
 Mean intensity difference must decrease.
-
-Output folder during processing:
-
-```
-aligned/gt_ois/photo/scene_x/
-```
-
-Input images come from:
-
-```
-geo/
-```
 
 ---
 
@@ -234,16 +215,15 @@ Delta E (LAB color distance) must decrease.
 
 Additional metrics computed:
 
-* PSNR
 * SSIM
 
 Output folder:
 
 ```
-aligned/gt_ois/color/scene_x/
+aligned/gt_ois/color/
 ```
 
-This becomes the **final dataset**.
+This becomes the **final output** of the alignment stage.
 
 ---
 
@@ -258,36 +238,30 @@ GT_SOURCE = "ois"
 The final dataset becomes:
 
 ```
-aligned/
-└── gt_ois/
-    └── color/
-        ├── scene_001/
-        │   ├── ois_sharp.jpg
-        │   ├── ois_blur.jpg
-        │   ├── nonois_sharp.jpg
-        │   └── nonois_blur.jpg
-        │
-        ├── scene_002/
-        │   ├── ois_sharp.jpg
-        │   ├── ois_blur.jpg
-        │   ├── nonois_sharp.jpg
-        │   └── nonois_blur.jpg
+workspace/
+  data/
+    aligned/
+      gt_ois/
+        color/
+          HandShake Method/
+            scene_001/
+              ois_sharp.jpg
+              ois_blur.jpg
+              nonois_sharp.jpg
+              nonois_blur.jpg
+          Sliding Method/
+            scene_002/
+              ...
+          Vibration Method/
+            scene_003/
+              ...
 ```
 
 All images are saved as:
 
 ```
-JPEG (quality = 95)
+JPEG
 ```
-
-Intermediate folders are automatically removed:
-
-```
-geo/
-photo/
-```
-
-to reduce storage usage.
 
 ---
 
@@ -296,11 +270,12 @@ to reduce storage usage.
 The script automatically creates:
 
 ```
-logs/
-│
-├── geo_log.csv
-├── photo_log.csv
-└── color_log.csv
+workspace/
+  logs/
+    geo_log.csv
+    photo_log.csv
+    color_log.csv
+    scene_fail_log.csv
 ```
 
 ---
@@ -310,11 +285,7 @@ logs/
 Columns:
 
 ```
-scene
-image
-inlier_ratio
-mean_flow
-valid
+scene, image, inlier_ratio, mean_flow, flow_p90, flow_roi_p90, flow_metric, model, valid, fallback
 ```
 
 ---
@@ -324,11 +295,7 @@ valid
 Columns:
 
 ```
-scene
-image
-mean_before
-mean_after
-valid
+scene, image, mean_before, mean_after, valid
 ```
 
 ---
@@ -338,19 +305,23 @@ valid
 Columns:
 
 ```
-scene
-image
-deltaE_before
-deltaE_after
-psnr
-ssim
-valid
+scene, image, deltaE_before, deltaE_after, ssim, used_color, overall_pass
+```
+
+---
+
+## 7.4 scene_fail_log.csv
+
+Columns:
+
+```
+scene, failed_images, failed_count, failed_phases
 ```
 
 If validation fails:
 
-* the image does **not proceed to the next stage**
-* the result is recorded in the corresponding log
+* the failure is recorded in the corresponding log
+* the scene is flagged for review in the dashboard
 
 ---
 
