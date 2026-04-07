@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Scene Dashboard", layout="wide")
 
-ROOT = Path("workspace")
+ROOT = Path(__file__).resolve().parent.parent.parent / "workspace"
 
 DATASET_256 = ROOT / "data" / "dataset_256" / "gt_ois"
 ALIGNED_COLOR = ROOT / "data" / "aligned" / "gt_ois" / "color"
@@ -146,26 +146,38 @@ def extract_capture_number(capture):
 # ---- Overrides Handling ----
 def load_overrides():
     if OVERRIDES_CSV.exists():
-        return pd.read_csv(OVERRIDES_CSV)
-    return pd.DataFrame(columns=["scene", "override_type", "old_value", "new_value", "timestamp"])
+        try:
+            df = pd.read_csv(OVERRIDES_CSV)
+            if "reviewer" not in df.columns:
+                df["reviewer"] = ""
+            return df.drop_duplicates(subset=["scene", "override_type"], keep="last")
+        except pd.errors.EmptyDataError:
+            pass
+    return pd.DataFrame(columns=["scene", "override_type", "old_value", "new_value", "timestamp", "reviewer"])
 
 
-def save_override(scene, override_type, old_value, new_value):
+def save_override(scene, override_type, old_value, new_value, reviewer=""):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     new_row = pd.DataFrame([{
         "scene": scene,
         "override_type": override_type,
         "old_value": old_value,
         "new_value": new_value,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reviewer": reviewer
     }])
     
     if OVERRIDES_CSV.exists():
-        df = pd.read_csv(OVERRIDES_CSV)
-        # Remove any existing override of the same type for this scene to keep only the latest active override
-        df = df[~((df["scene"] == scene) & (df["override_type"] == override_type))]
-        df = pd.concat([df, new_row], ignore_index=True)
-        df.to_csv(OVERRIDES_CSV, index=False)
+        try:
+            df = pd.read_csv(OVERRIDES_CSV)
+            if "reviewer" not in df.columns:
+                df["reviewer"] = ""
+                df = pd.concat([df, new_row], ignore_index=True)
+                df.to_csv(OVERRIDES_CSV, index=False)
+            else:
+                new_row.to_csv(OVERRIDES_CSV, mode="a", header=False, index=False)
+        except pd.errors.EmptyDataError:
+            new_row.to_csv(OVERRIDES_CSV, index=False)
     else:
         new_row.to_csv(OVERRIDES_CSV, index=False)
 
@@ -328,8 +340,32 @@ def has_named_images(root, scene):
     return any((scene_dir / name).exists() for name in IMAGE_ORDER)
 
 
+def file_signature(path):
+    path = Path(path)
+    if not path.exists():
+        return (str(path), 0, 0)
+    stat = path.stat()
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def log_signature():
+    return tuple(
+        file_signature(path)
+        for path in (
+            LOG_DIR / "geo_log.csv",
+            LOG_DIR / "photo_log.csv",
+            LOG_DIR / "color_log.csv",
+            LOG_DIR / "scene_fail_log.csv",
+            LOG_DIR / "scene_selection_log.csv",
+            LOG_DIR / "interpolation_log.csv",
+            LOG_DIR / "manual_review.csv",
+            OVERRIDES_CSV,
+        )
+    )
+
+
 @st.cache_data(show_spinner=False)
-def load_all_logs():
+def load_all_logs(_signature):
     return {
         "geo": safe_read_csv(LOG_DIR / "geo_log.csv"),
         "photo": safe_read_csv(LOG_DIR / "photo_log.csv"),
@@ -514,6 +550,7 @@ def build_scene_summary(logs):
         "min_ssim": pd.NA,
         "mean_deltaE_after": pd.NA,
         "failed_count": 0,
+        "geo_rows": 0,
         "interpolation_success": 0,
         "capture": pd.NA,
         "nonois_used_fallback": pd.NA,
@@ -541,6 +578,12 @@ def build_scene_summary(logs):
         lambda c: laplacian_csv_path(c, "nonois") is not None
     )
     summary["interpolation_complete"] = summary["interpolation_success"].fillna(0).ge(4)
+    summary["has_alignment_data"] = (
+        summary["geo_rows"].fillna(0).gt(0)
+        | summary["min_ssim"].notna()
+        | summary["mean_deltaE_after"].notna()
+        | summary["failed_count"].fillna(0).gt(0)
+    )
     summary["needs_attention"] = (
         summary["max_flow"].fillna(-1).gt(FLOW_THRESHOLD)
         | summary["min_ssim"].fillna(1).lt(SSIM_THRESHOLD)
@@ -599,12 +642,25 @@ def parse_failed_images_detail(failed_images_str):
 def get_scene_review_map(review_df):
     if review_df.empty or "scene" not in review_df.columns:
         return {}
+        
+    df = review_df.copy()
+    if "reviewer" not in df.columns:
+        df["reviewer"] = "Unknown"
+    else:
+        df["reviewer"] = df["reviewer"].fillna("Unknown").replace("", "Unknown")
+        
+    latest_per_reviewer = df.drop_duplicates(subset=["scene", "reviewer"], keep="last")
+    
     review_map = {}
-    for _, row in review_df.iterrows():
-        scene = row.get("scene")
-        label = row.get("label")
-        if scene is not None and not pd.isna(scene) and label is not None and not pd.isna(label):
-            review_map[str(scene)] = str(label).upper()
+    for scene, group in latest_per_reviewer.groupby("scene"):
+        labels = group["label"].dropna().astype(str).str.upper().unique()
+        if len(labels) == 0:
+            continue
+        elif len(labels) == 1:
+            review_map[str(scene)] = labels[0]
+        else:
+            review_map[str(scene)] = "CONFLICT"
+            
     return review_map
 
 
@@ -740,6 +796,7 @@ def tag_html(text, tone):
         "keep": "badge-keep",
         "reject": "badge-reject",
         "flag": "badge-flag",
+        "conflict": "badge-bad",
     }
     cls = tone_classes.get(tone, "badge-neutral")
     return f'<span class="dashboard-badge {cls}">{html.escape(str(text))}</span>'
@@ -761,6 +818,8 @@ def render_scene_header(scene_row, filtered_count, filtered_index, latest_review
         badges.insert(0, tag_html("REVIEW: REJECT", "reject"))
     elif latest_review == "FLAG":
         badges.insert(0, tag_html("REVIEW: FLAG", "flag"))
+    elif latest_review == "CONFLICT":
+        badges.insert(0, tag_html("REVIEW: CONFLICT", "conflict"))
 
     if above(scene_row.get("max_flow"), FLOW_THRESHOLD):
         badges.append(tag_html("Bad Alignment", "bad"))
@@ -1095,15 +1154,26 @@ def render_dataframe(df, empty_message):
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def save_review(scene, label, note=""):
+def save_review(scene, label, note="", reviewer=""):
     review_path = LOG_DIR / "manual_review.csv"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    row = pd.DataFrame([[scene, label, note]], columns=["scene", "label", "note"])
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_row = pd.DataFrame([[scene, label, note, reviewer, timestamp]], columns=["scene", "label", "note", "reviewer", "timestamp"])
 
     if review_path.exists():
-        row.to_csv(review_path, mode="a", header=False, index=False)
+        try:
+            df = pd.read_csv(review_path)
+            if "reviewer" not in df.columns or "timestamp" not in df.columns:
+                if "reviewer" not in df.columns: df["reviewer"] = ""
+                if "timestamp" not in df.columns: df["timestamp"] = ""
+                df = pd.concat([df, new_row], ignore_index=True)
+                df.to_csv(review_path, index=False)
+            else:
+                new_row.to_csv(review_path, mode="a", header=False, index=False)
+        except pd.errors.EmptyDataError:
+            new_row.to_csv(review_path, index=False)
     else:
-        row.to_csv(review_path, index=False)
+        new_row.to_csv(review_path, index=False)
 
 
 def delete_review_row(scene, global_idx):
@@ -1131,7 +1201,7 @@ def clear_all_global_reviews():
         review_path.unlink()
 
 
-logs = load_all_logs()
+logs = load_all_logs(log_signature())
 summary = build_scene_summary(logs)
 
 if summary.empty:
@@ -1139,19 +1209,34 @@ if summary.empty:
     st.warning("No scenes found in workspace logs.")
     st.stop()
 
-# Build global review map for statistics and filtering
+# ---- Sidebar Setup ----
+status_container = st.sidebar.container()
+selector_container = st.sidebar.container()
+st.sidebar.markdown("---")
+stats_container = st.sidebar.container()
+
+# ---- User Settings ----
+st.sidebar.header("User Settings")
+reviewer_name = st.sidebar.selectbox("Reviewer", ["JC", "JJ", "JP"], key="reviewer_name", help="Select your name before reviewing or modifying scenes.")
+st.sidebar.markdown("---")
+
+# Build global review map for statistics
 review_map = get_scene_review_map(logs["review"])
-summary["review_status"] = summary["scene"].map(lambda s: review_map.get(s, "NOT REVIEWED"))
+summary["global_review_status"] = summary["scene"].map(lambda s: review_map.get(s, "NOT REVIEWED"))
 
-# Derive quality status column
-def _quality_status(row):
-    if row.get("failed_count", 0) > 0:
-        return "Has Failures"
-    if row.get("needs_attention", False):
-        return "Needs Attention"
-    return "Clean"
+# Build active reviewer's personal map
+review_df_safe = logs.get("review", pd.DataFrame())
+my_review_map = {}
+if not review_df_safe.empty and "scene" in review_df_safe.columns:
+    rev_col = review_df_safe.get("reviewer", pd.Series(dtype=str)).fillna("Unknown").replace("", "Unknown")
+    my_latest = review_df_safe[rev_col == reviewer_name].drop_duplicates(subset=["scene"], keep="last")
+    if "label" in my_latest.columns:
+        my_review_map = dict(zip(my_latest["scene"], my_latest["label"].str.upper()))
 
-summary["quality_status"] = summary.apply(_quality_status, axis=1)
+summary["my_review_status"] = summary["scene"].map(lambda s: my_review_map.get(s, "NOT REVIEWED"))
+
+# Forward compatibility for global stats
+summary["review_status"] = summary["global_review_status"]
 
 # ---- Dashboard Statistics Header ----
 total_scenes = len(summary)
@@ -1159,9 +1244,8 @@ reviewed_count = summary["review_status"].ne("NOT REVIEWED").sum()
 keep_count = summary["review_status"].eq("KEEP").sum()
 reject_count = summary["review_status"].eq("REJECT").sum()
 flag_count = summary["review_status"].eq("FLAG").sum()
-clean_count = summary["quality_status"].eq("Clean").sum()
-attention_count = summary["quality_status"].eq("Needs Attention").sum()
-failed_count_total = summary["quality_status"].eq("Has Failures").sum()
+conflict_count = summary["review_status"].eq("CONFLICT").sum()
+failed_count_total = logs["fail"]["scene"].dropna().astype(str).nunique() if "scene" in logs["fail"].columns else 0
 progress_pct = int(reviewed_count / total_scenes * 100) if total_scenes > 0 else 0
 
 st.markdown(
@@ -1175,7 +1259,7 @@ st.markdown(
             <div><span style="font-size: 1.6rem; font-weight: 800; color: #22c55e;">{keep_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Keep</span></div>
             <div><span style="font-size: 1.6rem; font-weight: 800; color: #ef4444;">{reject_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Reject</span></div>
             <div><span style="font-size: 1.6rem; font-weight: 800; color: #f59e0b;">{flag_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Flag</span></div>
-            <div><span style="font-size: 1.6rem; font-weight: 800; color: #3b82f6;">{clean_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Clean</span></div>
+            <div><span style="font-size: 1.6rem; font-weight: 800; color: #ec4899;">{conflict_count}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Conflict</span></div>
             <div><span style="font-size: 1.6rem; font-weight: 800; color: #8b5cf6;">{total_scenes - int(reviewed_count)}</span> <span style="opacity: 0.6; font-size: 0.8rem; text-transform: uppercase;">Unreviewed</span></div>
         </div>
         <div style="background: rgba(128,128,128,0.15); border-radius: 999px; height: 8px; overflow: hidden;">
@@ -1187,13 +1271,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---- Sidebar Setup ----
-status_container = st.sidebar.container()
-selector_container = st.sidebar.container()
-st.sidebar.markdown("---")
-stats_container = st.sidebar.container()
+# Setup/User Settings moved up
 
-# ---- Sidebar Filters ----
 split_options = sorted(summary["split"].dropna().unique())
 method_options = sorted(summary["method"].dropna().unique())
 
@@ -1215,12 +1294,11 @@ sort_mode = st.sidebar.selectbox(
 # Review status filter
 st.sidebar.markdown("---")
 st.sidebar.subheader("Advanced Filters")
-review_options = sorted(summary["review_status"].unique())
-selected_reviews = st.sidebar.multiselect("Review Status", review_options, default=review_options)
+my_review_options = sorted(summary["my_review_status"].unique())
+selected_my_reviews = st.sidebar.multiselect("My Review Status", my_review_options, default=my_review_options, help="Filter by your personal review decisions.")
 
-# Quality status filter
-quality_options = sorted(summary["quality_status"].unique())
-selected_quality = st.sidebar.multiselect("Quality Status", quality_options, default=quality_options)
+global_review_options = sorted(summary["global_review_status"].unique())
+selected_global_reviews = st.sidebar.multiselect("Global Review Status", global_review_options, default=global_review_options, help="Filter by the combined team decisions (including Conflicts).")
 
 # Failed phase filter
 PHASE_LABELS = {
@@ -1240,26 +1318,6 @@ if all_phases:
         help="Filters the list to only show scenes that failed the selected pipeline validation checks."
     )
 
-# Flow / SSIM range sliders
-flow_vals = summary["max_flow"].dropna()
-if not flow_vals.empty:
-    flow_min, flow_max = float(flow_vals.min()), float(flow_vals.max())
-    if flow_min < flow_max:
-        flow_range = st.sidebar.slider("Flow ROI p90 range", flow_min, flow_max, (flow_min, flow_max), step=0.5)
-    else:
-        flow_range = (flow_min, flow_max)
-else:
-    flow_range = None
-
-ssim_vals = summary["min_ssim"].dropna()
-if not ssim_vals.empty:
-    ssim_min, ssim_max = float(ssim_vals.min()), float(ssim_vals.max())
-    if ssim_min < ssim_max:
-        ssim_range = st.sidebar.slider("Min SSIM range", ssim_min, ssim_max, (ssim_min, ssim_max), step=0.01)
-    else:
-        ssim_range = (ssim_min, ssim_max)
-else:
-    ssim_range = None
 
 # ---- Scoring Criteria Explainer ----
 st.sidebar.markdown("---")
@@ -1348,8 +1406,10 @@ filtered = summary.copy()
 filtered = filtered[
     filtered["split"].isin(selected_splits) & filtered["method"].isin(selected_methods)
 ]
-filtered = filtered[filtered["review_status"].isin(selected_reviews)]
-filtered = filtered[filtered["quality_status"].isin(selected_quality)]
+filtered = filtered[
+    filtered["my_review_status"].isin(selected_my_reviews) &
+    filtered["global_review_status"].isin(selected_global_reviews)
+]
 
 # Apply phase filter (show scenes that have ANY of the selected phases)
 if all_phases and selected_phases:
@@ -1363,17 +1423,6 @@ if all_phases and selected_phases:
                 phase_scenes.add(str(row["scene"]))
     filtered = filtered[filtered["scene"].isin(phase_scenes)]
 
-# Apply flow range filter
-if flow_range is not None:
-    filtered = filtered[
-        filtered["max_flow"].isna() | filtered["max_flow"].between(flow_range[0], flow_range[1])
-    ]
-
-# Apply SSIM range filter
-if ssim_range is not None:
-    filtered = filtered[
-        filtered["min_ssim"].isna() | filtered["min_ssim"].between(ssim_range[0], ssim_range[1])
-    ]
 
 # Apply text search
 if scene_search:
@@ -1402,11 +1451,30 @@ scene_labels = {
     for _, row in filtered.iterrows()
 }
 
+filtered_scenes = filtered["scene"].tolist()
+
+if "nav_scene" not in st.session_state or st.session_state["nav_scene"] not in filtered_scenes:
+    if filtered_scenes:
+        st.session_state["nav_scene"] = filtered_scenes[0]
+
 scene = selector_container.selectbox(
     "Select scene",
-    filtered["scene"].tolist(),
+    filtered_scenes,
     format_func=lambda value: scene_labels.get(value, value),
+    key="nav_scene"
 )
+
+def go_prev():
+    cur_idx = filtered_scenes.index(st.session_state["nav_scene"]) if st.session_state["nav_scene"] in filtered_scenes else 0
+    st.session_state["nav_scene"] = filtered_scenes[max(0, cur_idx - 1)]
+
+def go_next():
+    cur_idx = filtered_scenes.index(st.session_state["nav_scene"]) if st.session_state["nav_scene"] in filtered_scenes else 0
+    st.session_state["nav_scene"] = filtered_scenes[min(len(filtered_scenes)-1, cur_idx + 1)]
+
+nav_col1, nav_col2 = selector_container.columns(2)
+nav_col1.button("◀ Previous", on_click=go_prev, use_container_width=True, help="Shortcut to jump to the previous scene in your filtered list")
+nav_col2.button("Next ▶", on_click=go_next, use_container_width=True, help="Shortcut to jump to the next scene in your filtered list")
 
 scene_row = filtered[filtered["scene"] == scene].iloc[0]
 scene_position = filtered.index[filtered["scene"] == scene][0] + 1
@@ -1428,9 +1496,9 @@ review_scene = (
 )
 
 # Extract current review status if available
-current_review_status = None
-if not review_scene.empty:
-    current_review_status = review_scene.iloc[-1]["label"]
+current_review_status = scene_row.get("review_status", "NOT REVIEWED")
+if current_review_status == "NOT REVIEWED":
+    current_review_status = None
 
 capture = None if selection_row is None else selection_row.get("capture")
 ois_df = load_laplacian(capture, "ois")
@@ -1466,7 +1534,7 @@ if review_notice:
 # --------------------------------------------------------------------------------------
 # MAIN NAVIGATION TABS
 # --------------------------------------------------------------------------------------
-main_tabs = st.tabs(["Scene Inspector", "Data Management & History", "Export Dataset"])
+main_tabs = st.tabs(["Scene Inspector", "Data Management & History", "Assigned Splits Preview", "Export Dataset"])
 
 # ======================================================================================
 # TAB 1: SCENE INSPECTOR (Localized View)
@@ -1485,21 +1553,21 @@ with main_tabs[0]:
 
     with rev_cols[1]:
         if st.button("KEEP", use_container_width=True):
-            save_review(scene, "KEEP", review_note)
+            save_review(scene, "KEEP", review_note, reviewer_name)
             load_all_logs.clear()
             st.session_state["review_notice"] = {"msg": f"Saved KEEP for {scene_row['scene_name']}.", "type": "keep"}
             st.rerun()
 
     with rev_cols[2]:
         if st.button("REJECT", use_container_width=True):
-            save_review(scene, "REJECT", review_note)
+            save_review(scene, "REJECT", review_note, reviewer_name)
             load_all_logs.clear()
             st.session_state["review_notice"] = {"msg": f"Saved REJECT for {scene_row['scene_name']}.", "type": "reject"}
             st.rerun()
 
     with rev_cols[3]:
         if st.button("FLAG", use_container_width=True):
-            save_review(scene, "FLAG", review_note)
+            save_review(scene, "FLAG", review_note, reviewer_name)
             load_all_logs.clear()
             st.session_state["review_notice"] = {"msg": f"Saved FLAG for {scene_row['scene_name']}.", "type": "flag"}
             st.rerun()
@@ -1678,7 +1746,7 @@ with main_tabs[0]:
             )
             if st.button("Apply Split Change", key=f"btn_split_{scene}"):
                 if new_split != scene_row["split"]:
-                    save_override(scene, "split", scene_row["split"], new_split)
+                    save_override(scene, "split", scene_row["split"], new_split, reviewer_name)
                     load_all_logs.clear()
                     st.session_state["review_notice"] = {"msg": f"Assigned {scene_row['scene_name']} to {new_split}!", "type": "info"}
                     st.rerun()
@@ -1704,7 +1772,7 @@ with main_tabs[0]:
             )
             if st.button("Apply Method Change", key=f"btn_method_{scene}"):
                 if new_method != curr_mapped:
-                    save_override(scene, "method", raw_method, new_method)
+                    save_override(scene, "method", raw_method, new_method, reviewer_name)
                     load_all_logs.clear()
                     st.session_state["review_notice"] = {"msg": f"Changed {scene_row['scene_name']} method to {new_method}!", "type": "info"}
                     st.rerun()
@@ -1885,14 +1953,15 @@ with main_tabs[0]:
             else:
                 st.markdown('<div style="margin-bottom:1rem;"></div>', unsafe_allow_html=True)
                 
-                hcols = st.columns([2, 7, 2])
+                hcols = st.columns([2, 5, 2, 2])
                 hcols[0].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Decision</div>", unsafe_allow_html=True)
                 hcols[1].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Note</div>", unsafe_allow_html=True)
-                hcols[2].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Action</div>", unsafe_allow_html=True)
+                hcols[2].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Reviewer</div>", unsafe_allow_html=True)
+                hcols[3].markdown("<div style='color: var(--sb-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase;'>Action</div>", unsafe_allow_html=True)
                 st.markdown("<hr style='margin: 0.5rem 0 0.5rem 0; border-color: rgba(128,128,128,0.2);'>", unsafe_allow_html=True)
                 
                 for global_idx, row in review_scene.iterrows():
-                    row_cols = st.columns([2, 7, 2], vertical_alignment="center")
+                    row_cols = st.columns([2, 5, 2, 2], vertical_alignment="center")
                     
                     with row_cols[0]:
                         st.markdown(f"<div style='font-weight: 700; font-size: 0.95rem;'>{row['label']}</div>", unsafe_allow_html=True)
@@ -1903,8 +1972,15 @@ with main_tabs[0]:
                             st.markdown(f"<div style='font-size: 0.95rem;'>{html.escape(str(note_text))}</div>", unsafe_allow_html=True)
                         else:
                             st.markdown("<div style='opacity: 0.5; font-style: italic; font-size: 0.95rem;'>No note provided</div>", unsafe_allow_html=True)
-                    
+                            
                     with row_cols[2]:
+                        rev_text = row.get("reviewer", "")
+                        if pd.notna(rev_text) and rev_text:
+                            st.markdown(f"<div style='font-size: 0.9rem; color: var(--textColor); opacity: 0.8;'>👤 {html.escape(str(rev_text))}</div>", unsafe_allow_html=True)
+                        else:
+                            st.markdown("<div style='opacity: 0.5; font-style: italic; font-size: 0.85rem;'>-</div>", unsafe_allow_html=True)
+                    
+                    with row_cols[3]:
                         if st.button("Delete", key=f"del_row_{global_idx}", use_container_width=True):
                             delete_review_row(scene, global_idx)
                             load_all_logs.clear()
@@ -1924,13 +2000,43 @@ with main_tabs[0]:
 # TAB 2: DATA MANAGEMENT & HISTORY
 # ======================================================================================
 with main_tabs[1]:
-    section_header("Global Review History", level="h3", top_margin="0rem")
-    st.markdown("Overview of all manually reviewed scenes across the entire dataset.")
+    section_header("Reviewer Productivity Analytics", level="h3", top_margin="0rem")
+    st.markdown("A leaderboard tracking the latest exact review decisions strictly scoped per unique reviewer.")
 
     full_review_df = logs.get("review", pd.DataFrame())
     
     if full_review_df.empty:
         st.info("No global manual review history found.")
+    else:
+        # Produce deduplicated analytics table
+        clean_df = full_review_df.copy()
+        if "reviewer" not in clean_df.columns:
+            clean_df["reviewer"] = "Unknown"
+        else:
+            clean_df["reviewer"] = clean_df["reviewer"].fillna("Unknown").replace("", "Unknown")
+        
+        # We drop duplicates so a reviewer hammering 'KEEP' multiple times on a single scene only counts once
+        uniq_reviews = clean_df.drop_duplicates(subset=["scene", "reviewer"], keep="last")
+        
+        stats_data = []
+        for rev, group in uniq_reviews.groupby("reviewer"):
+            counts = group["label"].str.upper().value_counts()
+            stats_data.append({
+                "Reviewer": "👤 " + str(rev),
+                "Total Scenes": len(group),
+                "KEEP": counts.get("KEEP", 0),
+                "REJECT": counts.get("REJECT", 0),
+                "FLAG": counts.get("FLAG", 0),
+            })
+            
+        stats_df = pd.DataFrame(stats_data).sort_values("Total Scenes", ascending=False)
+        st.dataframe(stats_df, use_container_width=True, hide_index=True)
+        
+    section_header("Raw Review Event Log", level="h3")
+    st.markdown("Chronological un-deduplicated log of every review action exactly as it was recorded.")
+
+    if full_review_df.empty:
+        st.info("No history to display.")
     else:
         # Display the global dataframe
         st.dataframe(full_review_df, use_container_width=True, hide_index=True)
@@ -1960,10 +2066,10 @@ with main_tabs[1]:
             
             # Using 'in' instead of '==' to catch variations like "handshake_1" or "sliding_test"
             if is_linear is True and "handshake" in method:
-                save_override(scene_id, "method", row["method"], "Sliding Method")
+                save_override(scene_id, "method", row["method"], "Sliding Method", reviewer_name)
                 fixes_applied += 1
             elif is_linear is False and "sliding" in method:
-                save_override(scene_id, "method", row["method"], "HandShake Method")
+                save_override(scene_id, "method", row["method"], "HandShake Method", reviewer_name)
                 fixes_applied += 1
                 
         if fixes_applied > 0:
@@ -1972,75 +2078,151 @@ with main_tabs[1]:
             st.rerun()
         else:
             st.info("All scenes are already correctly mapped based on their linear motion characteristic.")
-
-    section_header("Batch Split Assignment", level="h4")
+    st.write("")
+    section_header("Auto-Reject Failed Alignments", level="h4")
     st.markdown(
-        "Assign a dataset split (Training, Validation, Testing) to multiple scenes at once. "
-        "Filter by method and/or current split to target specific groups."
+        "Automatically marks any scene as **REJECT** if it failed the automated alignment checks (i.e., appears in the scene fail logs). "
+        "These scenes generally have heavily distorted or poorly matched images and are unsafe for dataset export."
     )
-    batch_cols = st.columns(3)
-    with batch_cols[0]:
-        batch_method_filter = st.selectbox(
-            "Filter by Method",
-            options=["All Methods"] + sorted(summary["method"].dropna().unique().tolist()),
-            key="batch_method_filter"
-        )
-    with batch_cols[1]:
-        batch_current_split = st.selectbox(
-            "Filter by Current Split",
-            options=["All Splits"] + SPLIT_OPTIONS,
-            key="batch_current_split"
-        )
-    with batch_cols[2]:
-        batch_target_split = st.selectbox(
-            "Assign to Split",
-            options=SPLIT_OPTIONS,
-            key="batch_target_split"
-        )
+    if st.button("Auto-Reject All Alignment Failures", type="primary"):
+        rejected_count = 0
+        
+        review_df = logs.get("review", pd.DataFrame())
+        my_reviews = {}
+        if not review_df.empty and "scene" in review_df.columns:
+            rev_col = review_df.get("reviewer", pd.Series(dtype=str)).fillna("Unknown").replace("", "Unknown")
+            my_latest = review_df[rev_col == reviewer_name].drop_duplicates(subset=["scene"], keep="last")
+            if "label" in my_latest.columns:
+                my_reviews = dict(zip(my_latest["scene"], my_latest["label"].str.upper()))
 
-    batch_target = summary.copy()
-    if batch_method_filter != "All Methods":
-        batch_target = batch_target[batch_target["method"] == batch_method_filter]
-    if batch_current_split != "All Splits":
-        batch_target = batch_target[batch_target["split"] == batch_current_split]
-
-    batch_count = len(batch_target)
-    st.caption(f"{batch_count} scene(s) match the filter criteria.")
-
-    if st.button(f"Assign {batch_count} scenes to '{batch_target_split}'", disabled=batch_count == 0):
-        applied = 0
-        for _, row in batch_target.iterrows():
-            if row["split"] != batch_target_split:
-                save_override(row["scene"], "split", row["split"], batch_target_split)
-                applied += 1
-        if applied > 0:
+        for _, row in summary.iterrows():
+            my_status = my_reviews.get(str(row["scene"]), "NOT REVIEWED")
+            if row.get("failed_count", 0) > 0 and my_status != "REJECT":
+                save_review(row["scene"], "REJECT", "Auto-rejected due to pipeline alignment failure", reviewer_name)
+                rejected_count += 1
+                
+        if rejected_count > 0:
             load_all_logs.clear()
-            st.success(f"Assigned {applied} scene(s) to '{batch_target_split}'!")
+            st.success(f"Successfully auto-rejected {rejected_count} failed alignment scenes!")
             st.rerun()
         else:
-            st.info("All matching scenes already have the selected split.")
+            st.info("No unreviewed failed alignment scenes found. They either don't exist or have already been reviewed.")
 
     st.write("")
-    section_header("Manual Overrides History", level="h4")
-    st.markdown("These overrides are applied dynamically and determine the final structure exported in the Export Tab.")
+    section_header("Dataset Modifications Log", level="h4")
+    st.markdown("A persistent audit trail of all manual adjustments made to scene categorizations. These modifications dynamically alter the final exported dataset without modifying the underlying raw logs.")
     
     overrides_df = load_overrides()
     if overrides_df.empty:
-        st.info("No manual overrides applied yet.")
+        st.info("No manual dataset modifications applied yet.")
     else:
-        st.dataframe(overrides_df.sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
-        if st.button("Clear All Overrides", type="secondary"):
-            if OVERRIDES_CSV.exists():
-                OVERRIDES_CSV.unlink()
-            load_all_logs.clear()
-            st.success("Cleared all manual dataset overrides.")
-            st.rerun()
+        overrides_df_sorted = overrides_df.sort_values("timestamp", ascending=False)
+        split_overrides = overrides_df_sorted[overrides_df_sorted["override_type"] == "split"]
+        method_overrides = overrides_df_sorted[overrides_df_sorted["override_type"] == "method"]
+        
+        hist_tabs = st.tabs(["Split Overrides", "Method Overrides"])
+        
+        with hist_tabs[0]:
+            if split_overrides.empty:
+                st.info("No split overrides applied.")
+            else:
+                st.dataframe(split_overrides, use_container_width=True, hide_index=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("Clear Split Modifications", type="secondary"):
+                    df = load_overrides()
+                    df = df[df["override_type"] != "split"]
+                    if df.empty:
+                        if OVERRIDES_CSV.exists():
+                            OVERRIDES_CSV.unlink()
+                    else:
+                        df.to_csv(OVERRIDES_CSV, index=False)
+                    load_all_logs.clear()
+                    st.success("Cleared all manual split modifications.")
+                    st.rerun()
+                
+        with hist_tabs[1]:
+            if method_overrides.empty:
+                st.info("No method overrides applied.")
+            else:
+                st.dataframe(method_overrides, use_container_width=True, hide_index=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("Clear Method Modifications", type="secondary"):
+                    df = load_overrides()
+                    df = df[df["override_type"] != "method"]
+                    if df.empty:
+                        if OVERRIDES_CSV.exists():
+                            OVERRIDES_CSV.unlink()
+                    else:
+                        df.to_csv(OVERRIDES_CSV, index=False)
+                    load_all_logs.clear()
+                    st.success("Cleared all manual method modifications.")
+                    st.rerun()
 
 
 # ======================================================================================
-# TAB 3: EXPORT DATASET
+# TAB 3: ASSIGNED SPLITS PREVIEW
 # ======================================================================================
 with main_tabs[2]:
+    section_header("Assigned Splits Preview", level="h3", top_margin="0rem")
+    st.markdown("Visually review the images comprising each dataset split before you export.")
+
+    keep_scenes = summary[summary["review_status"] == "KEEP"].copy()
+    total_keep = len(keep_scenes)
+    exportable = keep_scenes[keep_scenes["split"] != "Unassigned"]
+    total_exportable = len(exportable)
+
+    if total_exportable == 0:
+        st.info("No KEEP scenes are assigned to an active split (Training, Validation, or Testing).")
+    else:
+        unique_splits = sorted(exportable["split"].unique())
+        split_tabs_ui = st.tabs(unique_splits)
+        for sp_idx, sp_name in enumerate(unique_splits):
+            with split_tabs_ui[sp_idx]:
+                sp_exportable = exportable[exportable["split"] == sp_name].sort_values("scene_number")
+                st.metric("Total Assigned Scenes", len(sp_exportable))
+                
+                ds_tabs = st.tabs(["OIS Images", "Non-OIS Images"])
+                
+                # OIS
+                with ds_tabs[0]:
+                    for _, row in sp_exportable.iterrows():
+                        scene_dir = resolve_scene_dir(DATASET_256, row["scene"])
+                        ois_blur = scene_dir / "ois_blur.jpg"
+                        ois_sharp = scene_dir / "ois_sharp.jpg"
+                        if ois_blur.exists() or ois_sharp.exists():
+                            orig_m = split_rel_path(str(row.get("scene", "")))[0] if str(row.get("scene", "")) else "Unknown"
+                            upd_m = str(row.get("method", "Unknown"))
+                            m_disp = f"`{upd_m}` (moved from `{orig_m}`)" if orig_m != upd_m else f"`{upd_m}`"
+                            st.markdown(f"**Scene:** `{row['scene_name']}` &nbsp;&nbsp;|&nbsp;&nbsp; **Capture:** `{extract_capture_number(row.get('capture'))}` &nbsp;&nbsp;|&nbsp;&nbsp; **Method:** {m_disp}")
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                if ois_blur.exists(): st.image(str(ois_blur), caption="Input (ois_blur)")
+                            with c2:
+                                if ois_sharp.exists(): st.image(str(ois_sharp), caption="Target (ois_sharp)")
+                            st.divider()
+                
+                # Non-OIS
+                with ds_tabs[1]:
+                    for _, row in sp_exportable.iterrows():
+                        scene_dir = resolve_scene_dir(DATASET_256, row["scene"])
+                        nonois_blur = scene_dir / "nonois_blur.jpg"
+                        nonois_sharp = scene_dir / "nonois_sharp.jpg"
+                        if nonois_blur.exists() or nonois_sharp.exists():
+                            orig_m = split_rel_path(str(row.get("scene", "")))[0] if str(row.get("scene", "")) else "Unknown"
+                            upd_m = str(row.get("method", "Unknown"))
+                            m_disp = f"`{upd_m}` (moved from `{orig_m}`)" if orig_m != upd_m else f"`{upd_m}`"
+                            st.markdown(f"**Scene:** `{row['scene_name']}` &nbsp;&nbsp;|&nbsp;&nbsp; **Capture:** `{extract_capture_number(row.get('capture'))}` &nbsp;&nbsp;|&nbsp;&nbsp; **Method:** {m_disp}")
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                if nonois_blur.exists(): st.image(str(nonois_blur), caption="Input (nonois_blur)")
+                            with c2:
+                                if nonois_sharp.exists(): st.image(str(nonois_sharp), caption="Target (nonois_sharp)")
+                            st.divider()
+
+# ======================================================================================
+# TAB 4: EXPORT DATASET
+# ======================================================================================
+with main_tabs[3]:
     section_header("Export Reviewed Dataset", level="h3", top_margin="0rem")
     st.markdown(
         "Export all **KEEP**-reviewed scenes that have an assigned split (Training, Validation, or Testing) "
@@ -2048,7 +2230,6 @@ with main_tabs[2]:
         "Scenes marked as **Unassigned** will not be exported. Use the Scene Inspector to assign splits first."
     )
 
-    # Gather all KEEP scenes from the full summary (not just filtered)
     keep_scenes = summary[summary["review_status"] == "KEEP"].copy()
     total_keep = len(keep_scenes)
     exportable = keep_scenes[keep_scenes["split"] != "Unassigned"]
@@ -2060,14 +2241,23 @@ with main_tabs[2]:
     elif total_exportable == 0:
         st.warning(f"{total_keep} KEEP scenes found, but none have an assigned split. Use the Scene Inspector to assign Training/Validation/Testing.")
     else:
-        # Summary by split
+        # Summary by split and method
         section_header("Scenes to Export", level="h4")
-        split_summary = keep_scenes.groupby("split").agg(
-            count=("scene", "size"),
-            methods=("method", lambda x: ", ".join(sorted(x.unique()))),
-        ).reset_index()
-        split_summary.columns = ["Split", "Scenes", "Methods"]
-        st.dataframe(split_summary, use_container_width=True, hide_index=True)
+        st.markdown("Breakdown by folder structure and internal scene methods:")
+        
+        split_method_summary = exportable.groupby(["split", "method"]).size().reset_index(name="Scenes")
+        split_method_summary.columns = ["Split", "Method", "Count"]
+        
+        unique_splits = sorted(exportable["split"].unique())
+        export_tabs = st.tabs(unique_splits)
+        for i, split_name in enumerate(unique_splits):
+            with export_tabs[i]:
+                split_folder = SPLIT_EXPORT_MAP.get(split_name, split_name.lower())
+                st.caption(f"**Target Paths:** `dataset_ois/{split_folder}/` & `dataset_nonois/{split_folder}/`")
+                
+                sp_data = split_method_summary[split_method_summary["Split"] == split_name]
+                st.metric("Total Output Pairs (per dataset)", sp_data["Count"].sum())
+                st.dataframe(sp_data[["Method", "Count"]], use_container_width=True, hide_index=True)
 
         # Preview table
         if unassigned_keep > 0:
@@ -2080,13 +2270,10 @@ with main_tabs[2]:
                 split_scenes_sorted = exportable[exportable["split"] == split_label].sort_values("scene_number")
                 for idx, (_, row) in enumerate(split_scenes_sorted.iterrows(), start=1):
                     preview_rows.append({
-                        "Number": f"{idx:03d}",
-                        "Split": split_key,
-                        "Scene": row["scene_name"],
-                        "Method": row["method"],
-                        "Quality Score": format_num(row.get("quality_score"), 1),
-                        "Flow p90": format_num(row.get("max_flow")),
-                        "Min SSIM": format_num(row.get("min_ssim"), 3),
+                        "Export Filename": f"{idx:03d}.jpg",
+                        "Original Scene": row["scene_name"],
+                        "Split Target": split_key,
+                        "Exported Method": row["method"],
                     })
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
@@ -2131,8 +2318,3 @@ with main_tabs[2]:
                     except Exception as e:
                         st.error(f"Export failed: {e}")
 
-        # Show last export manifest
-        if "last_export_manifest" in st.session_state:
-            st.markdown(f"**Last export**: {st.session_state.get('last_export_time', '-')}")
-            with st.expander("View Dataset Export Log", expanded=False):
-                st.dataframe(st.session_state["last_export_manifest"], use_container_width=True, hide_index=True)

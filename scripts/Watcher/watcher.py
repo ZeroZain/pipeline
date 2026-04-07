@@ -427,6 +427,11 @@ def print_scan_summary(stats):
     )
 
 
+def print_incomplete_items(stats):
+    for rel_path, reason in stats.get("incomplete_items", []):
+        print(f"[INCOMPLETE] {rel_path} ({reason})")
+
+
 # =====================================================
 # === QUEUE ===========================================
 # =====================================================
@@ -457,7 +462,8 @@ def scan_folders():
         "failed_hold": 0,
         "queued": 0,
         "active": 0,
-        "failed": 0
+        "failed": 0,
+        "incomplete_items": []
     }
 
     for path in find_capture_folders(WATCH_FOLDER):
@@ -475,6 +481,7 @@ def scan_folders():
         if status != "ready":
             with queue_lock:
                 failed_captures.pop(key, None)
+            stats["incomplete_items"].append((capture_id(path, WATCH_FOLDER), status))
             stats["incomplete"] += 1
             continue
 
@@ -561,6 +568,7 @@ if __name__ == "__main__":
         while True:
             stats = scan_folders()
             print_scan_summary(stats)
+            print_incomplete_items(stats)
             time.sleep(SCAN_INTERVAL)
 
     except KeyboardInterrupt:

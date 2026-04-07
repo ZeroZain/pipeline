@@ -462,9 +462,8 @@ def process_capture(capture_name, scene_id):
     if not ois_results or not nonois_results:
         return scene_id
 
-    # Track selected frame pairs to avoid duplicates within this capture
-    selected_ois_frame_keys = set()
-    selected_nonois_frame_keys = set()
+    # Keep blur frames unique across scenes; sharp frames may be reused.
+    selected_ois_blur_files = set()
     selected_nonois_blur_files = set()
 
     ois_values = [s for _, s in ois_results]
@@ -557,6 +556,9 @@ def process_capture(capture_name, scene_id):
         nonois_sharp_file = nonois_results[sharp_idx_nonois][0]
         nonois_blur_file = nonois_results[blur_idx_nonois][0]
 
+        if blur_file in selected_ois_blur_files or nonois_blur_file in selected_nonois_blur_files:
+            continue
+
         ois_sharp_img = read_image(os.path.join(ois_dir, sharp_file))
         ois_blur_img = read_image(os.path.join(ois_dir, blur_file))
         nonois_sharp_img = read_image(os.path.join(nonois_dir, nonois_sharp_file))
@@ -605,11 +607,7 @@ def process_capture(capture_name, scene_id):
             nonois_dir
         )
 
-        ois_frame_key = (sharp_file, blur_file)
-        nonois_frame_key = (nonois_sharp_file, nonois_blur_file)
-
-        selected_ois_frame_keys.add(ois_frame_key)
-        selected_nonois_frame_keys.add(nonois_frame_key)
+        selected_ois_blur_files.add(blur_file)
         selected_nonois_blur_files.add(nonois_blur_file)
         scene_id += 1
         scene_count += 1
@@ -666,17 +664,8 @@ def process_capture(capture_name, scene_id):
             nonois_sharp_file = nonois_results[sharp_idx_nonois][0]
             nonois_blur_file = nonois_results[blur_idx_nonois][0]
 
-            ois_frame_key = (
-                sharp_file,
-                blur_file,
-            )
-            nonois_frame_key = (
-                nonois_sharp_file,
-                nonois_blur_file,
-            )
             if (
-                ois_frame_key in selected_ois_frame_keys or
-                nonois_frame_key in selected_nonois_frame_keys or
+                blur_file in selected_ois_blur_files or
                 nonois_blur_file in selected_nonois_blur_files
             ):
                 continue
@@ -729,8 +718,7 @@ def process_capture(capture_name, scene_id):
                 nonois_dir
             )
 
-            selected_ois_frame_keys.add(ois_frame_key)
-            selected_nonois_frame_keys.add(nonois_frame_key)
+            selected_ois_blur_files.add(blur_file)
             selected_nonois_blur_files.add(nonois_blur_file)
             scene_id += 1
             scene_count += 1
