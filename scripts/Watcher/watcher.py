@@ -14,7 +14,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORKSPACE_ROOT = os.path.join(REPO_ROOT, "workspace")
 DATA_ROOT = os.path.join(WORKSPACE_ROOT, "data")
 
-WATCH_FOLDER = r"G:\My Drive\Thesis or Crisis\Videos\Dataset Capture"
+WATCH_FOLDER = r"G:\My Drive\Thesis or Crisis\Videos\4_14"
 STAGING_FOLDER = os.path.join(DATA_ROOT, "staging")
 OUTPUT_FOLDER = os.path.join(DATA_ROOT, "decoded_frames")
 

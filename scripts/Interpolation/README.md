@@ -1,160 +1,38 @@
-# Processing Pipeline Position
+# Interpolation
 
-This stage runs **after the alignment pipeline**.
+## Overview
+The Interpolation script normalizes the spatial resolution of all aligned image pairs, preparing them for final structured output.
 
-Complete preprocessing flow:
+## Thesis Alignment: Interpolation (Downsampling)
+This script directly implements the "Interpolation (Downsampling)" stage of the methodology.
+* It applies inward center cropping to remove invalid border regions introduced during Geometric Alignment.
+* It applies **Bicubic interpolation** to standardize images.
+* The default size is **1080 × 1080 pixels** (configurable).
+* As noted in the thesis, Bicubic interpolation preserves edge structures more effectively than Nearest Neighbor or Bilinear methods, maintaining structural consistency for fair evaluation.
 
-```
-Raw Image (.dng / .jpg / .png)
-        ↓
-RAW decoding (if .dng)
-        ↓
-Geometric Alignment (Homography/Affine)
-        ↓
-Photometric & Color Alignment (LAB Global Mean)
-        ↓
-Bicubic Interpolation & Inward Crop (256 × 256)
-        ↓
-Final Benchmark Dataset
+## Outputs
+* The final resized images are output to `workspace/data/dataset_<size>/`.
 
-```
+## Setup & Usage
 
-This ensures that interpolation is applied only to **fully aligned and color-corrected image pairs**.
-
----
-
-# 1. Project Folder Structure
-
-The interpolation script expects the **output of the alignment pipeline**, organized by capture method:
-
-```
-workspace/
-  data/
-    aligned/
-      gt_ois/
-        color/
-          HandShake Method/
-            scene_001/
-              ois_sharp.jpg
-              ois_blur.jpg
-              nonois_sharp.jpg
-              nonois_blur.jpg
-          Sliding Method/
-            scene_002/
-              ...
-          Vibration Method/
-            scene_003/
-              ...
-
-    dataset_256/                 (auto-created)
-      gt_ois/
-        HandShake Method/
-          scene_001/
-            ...
-        Sliding Method/
-          ...
-        Vibration Method/
-          ...
-```
-
----
-
-# 2. Required Libraries
-
-Install required libraries via terminal:
-
+### Dependencies
+This script utilizes OpenCV for bicubic interpolation.
 ```bash
 pip install opencv-python numpy tqdm
-
 ```
 
-| Library | Purpose |
-| --- | --- |
-| OpenCV | Image loading, resizing, and saving |
-| NumPy | Matrix operations |
-| **tqdm** | **Visual progress bar tracking** |
-
----
-
-# 3. Selecting Ground Truth Source
-
-Inside `n256.py`, locate:
-
-```python
-GT_SOURCE = "ois"
-
+### Running the Script
+Run the script from the project root. It will process all aligned scenes.
+```bash
+python scripts/Interpolation/interpolate.py
 ```
 
-| Value | Dataset Used |
-| --- | --- |
-| `"ois"` | reads from `aligned/gt_ois/color/` |
-| `"nonois"` | reads from `aligned/gt_nonois/color/` |
+To use a different size (e.g., 256):
+```bash
+python scripts/Interpolation/interpolate.py --size 256
+```
 
----
-
-# 4. Inward Center Crop (Black Artifact Removal)
-
-Geometric alignment often causes black "void" areas at the edges due to image rotation and warping.
-
-To ensure a clean dataset, the script performs an **Inward-Zoom Crop** before resizing.
-
-* **Default Factor:** `0.8` (Takes the center 80% of the image).
-* **Result:** Removes homography-induced border artifacts.
-
----
-
-# 5. Smart Resume Logic (Skip Existing)
-
-The script features **Resume Logic** to save time during large-scale processing:
-
-1. It checks the `dataset_256` folder before processing a file.
-2. If the processed `.jpg` already exists, it **skips** that image.
-3. This allows you to stop and restart the script or add new scenes without re-processing old ones.
-
-> **Note:** If you change the `crop_factor` or `TARGET_SIZE`, delete the `dataset_256` folder to force the script to re-generate the images.
-
----
-
-# 6. Bicubic Interpolation
-
-After cropping, images are resized to **256 × 256** using `cv2.INTER_CUBIC`.
-
-**Advantages for Thesis Research:**
-
-* Uses a **4 × 4 pixel neighborhood** for smoother gradients.
-* Preserves high-frequency details better than Bilinear interpolation.
-* Industry standard for Super-Resolution and Deblurring datasets (e.g., GOPRO, REDS).
-
----
-
-# 7. Progress Monitoring
-
-The script uses a dynamic progress bar (`tqdm`) to monitor the status:
-
-* **Percentage:** Overall progress of all scenes.
-* **Speed:** Scenes processed per second.
-* **ETA:** Estimated time remaining until dataset completion.
-
----
-
-# 8. Log File Management
-
-Logs are saved to `workspace/logs/interpolation_log.csv`.
-
-**Update Behavior:** The script now **appends** to the log. This ensures that if you process half of your dataset today and the other half tomorrow, the log file will contain the history of both sessions.
-
-| Status | Meaning |
-| --- | --- |
-| SUCCESS | Image successfully cropped and resized. |
-| SKIPPED_SMALL | Image resolution was smaller than 256px. |
-
----
-
-# 9. Purpose of Interpolation Stage
-
-The interpolation stage ensures:
-
-1. **Border Removal:** Eliminates black pixels from alignment warping.
-2. **Consistency:** Standard 256x256 resolution for **MLWNet/SwinIR** models.
-3. **Efficiency:** Reduces memory usage during GPU training.
-4. **Validity:** Ensures the AI learns from valid image content, not border artifacts.
+To run interpolation on a specific scene only:
+```bash
+python scripts/Interpolation/interpolate.py --scene "HandShake Method/scene_001"
+```

@@ -30,6 +30,11 @@ GEO_INLIER_THRESHOLD = 0.1
 FLOW_ROI_P90_THRESHOLD = 15.0
 FLOW_METRIC_NAME = "roi_p90"
 FLOW_ROI_BORDER = 0.15
+#ghosting filtering
+GHOST_EDGE_RATIO_THRESHOLD = 0.20
+MIN_VALID_OVERLAP_RATIO = 0.80
+GHOST_EDGE_DILATE_SIZE = 3
+GHOST_EDGE_DILATE_ITERS = 1
 COLOR_EDGE_BAND = 0.10
 COLOR_EDGE_CHANGE_RATIO_FLOOR = 0.60
 OIS_BLUR_MEAN_LUMA_MAX_DELTA = 1.5
@@ -45,7 +50,6 @@ ECC_MAX_ITERS = 100
 ECC_EPS = 1e-6
 SCENE_PATTERN = re.compile(r"^scene_(\d+)$")
 MIN_LINEAR_DET = 0.05
-MIN_VALID_OVERLAP_RATIO = 0.80
 FOLDOVER_GRID_SIZE = 6
 FOLDOVER_MIN_JACOBIAN_RATIO = 0.01
 
@@ -158,7 +162,7 @@ def init_logs():
     geo_log_path = os.path.join(LOG_ROOT, "geo_log.csv")
     init_log(
         geo_log_path,
-        ["scene", "image", "inlier_ratio", "mean_flow", "flow_p90", "flow_roi_p90", "flow_metric", "model", "valid", "fallback"]
+        ["scene", "image", "inlier_ratio", "mean_flow", "flow_p90", "flow_roi_p90", "ghost_edge_ratio", "flow_metric", "model", "valid", "fallback"]
     )
 
     photo_log_path = os.path.join(LOG_ROOT, "photo_log.csv")
@@ -432,6 +436,34 @@ def is_transform_usable(shape, M):
     return True, valid_ratio
 
 
+def compute_ghost_edge_ratio(ref, aligned):
+    ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
+    aligned_gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
+
+    ref_edges = cv2.Canny(ref_gray, 60, 140)
+    aligned_edges = cv2.Canny(aligned_gray, 60, 140)
+
+    kernel = np.ones((GHOST_EDGE_DILATE_SIZE, GHOST_EDGE_DILATE_SIZE), np.uint8)
+    ref_edges_dilated = cv2.dilate(ref_edges, kernel, iterations=GHOST_EDGE_DILATE_ITERS)
+
+    h, w = ref_edges.shape
+    by = int(h * FLOW_ROI_BORDER)
+    bx = int(w * FLOW_ROI_BORDER)
+    if by > 0 and bx > 0 and (h - 2 * by) > 5 and (w - 2 * bx) > 5:
+        ref_roi = ref_edges_dilated[by:h - by, bx:w - bx]
+        aligned_roi = aligned_edges[by:h - by, bx:w - bx]
+    else:
+        ref_roi = ref_edges_dilated
+        aligned_roi = aligned_edges
+
+    aligned_count = float(np.count_nonzero(aligned_roi))
+    if aligned_count < 1.0:
+        return 0.0
+
+    ghost_edges = np.logical_and(aligned_roi > 0, ref_roi == 0)
+    return float(np.count_nonzero(ghost_edges) / aligned_count)
+
+
 def compute_flow_metrics(ref, aligned):
     flow = cv2.calcOpticalFlowFarneback(
         cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY),
@@ -471,6 +503,7 @@ def evaluate_candidate(ref, img, M):
 
     aligned = warp_with_matrix(img, M, ref.shape)
     mean_flow, p90_flow, roi_p90_flow = compute_flow_metrics(ref, aligned)
+    ghost_edge_ratio = compute_ghost_edge_ratio(ref, aligned)
 
     return {
         "matrix": M,
@@ -478,8 +511,9 @@ def evaluate_candidate(ref, img, M):
         "mean_flow": mean_flow,
         "flow_p90": p90_flow,
         "flow_roi_p90": roi_p90_flow,
+        "ghost_edge_ratio": ghost_edge_ratio,
         "valid_ratio": valid_ratio,
-        "score": roi_p90_flow,
+        "score": roi_p90_flow + (ghost_edge_ratio * 20.0),
     }
 
 
@@ -963,6 +997,7 @@ def run_pipeline(target_scene=None, target_method=None):
                         "mean_flow": 0.0,
                         "flow_p90": 0.0,
                         "flow_roi_p90": 0.0,
+                        "ghost_edge_ratio": 0.0,
                         "valid_ratio": 1.0,
                         "score": 0.0,
                         "model": "identity",
@@ -976,7 +1011,8 @@ def run_pipeline(target_scene=None, target_method=None):
             elif chain_best is not None:
                 if is_nonois_sharp or is_nonois_blur:
                     chain_is_consistent = (
-                        chain_best["flow_roi_p90"] <= (best["flow_roi_p90"] * 1.10)
+                        chain_best["flow_roi_p90"] <= (best["flow_roi_p90"] * 1.10) and
+                        chain_best["ghost_edge_ratio"] <= (best["ghost_edge_ratio"] + 0.02)
                     )
                     if chain_is_consistent or chain_best["score"] < best["score"]:
                         best = chain_best
@@ -991,10 +1027,12 @@ def run_pipeline(target_scene=None, target_method=None):
             mean_flow = best["mean_flow"]
             flow_p90 = best["flow_p90"]
             flow_roi_p90 = best["flow_roi_p90"]
+            ghost_edge_ratio = best.get("ghost_edge_ratio", 0.0)
             ratio = best["inlier_ratio"]
             fallback_mode = best["fallback"]
             geo_ok = (
                 flow_roi_p90 < FLOW_ROI_P90_THRESHOLD and
+                ghost_edge_ratio < GHOST_EDGE_RATIO_THRESHOLD and
                 best["model"] != "identity"
             )
 
@@ -1006,6 +1044,7 @@ def run_pipeline(target_scene=None, target_method=None):
                     mean_flow,
                     flow_p90,
                     flow_roi_p90,
+                    ghost_edge_ratio,
                     FLOW_METRIC_NAME,
                     best["model"],
                     geo_ok,
@@ -1118,6 +1157,8 @@ def run_pipeline(target_scene=None, target_method=None):
                         geo_detail.append("IDENTITY")
                     if flow_roi_p90 >= FLOW_ROI_P90_THRESHOLD:
                         geo_detail.append(f"FLOW({flow_roi_p90:.1f})")
+                    if ghost_edge_ratio >= GHOST_EDGE_RATIO_THRESHOLD:
+                        geo_detail.append(f"GHOST({ghost_edge_ratio:.2f})")
                     if not geo_detail:
                         geo_detail.append("UNKNOWN")
                     fail_tags.append("geo:" + "-".join(geo_detail))

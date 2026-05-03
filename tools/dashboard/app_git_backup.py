@@ -1,5 +1,4 @@
 import html
-import json
 import re
 from pathlib import Path
 import shutil
@@ -19,7 +18,7 @@ st.set_page_config(page_title="Scene Dashboard", layout="wide")
 
 ROOT = Path(__file__).resolve().parent.parent.parent / "workspace"
 
-DATASET_TARGET = ROOT / "data" / "dataset_1080" / "gt_ois"
+DATASET_256 = ROOT / "data" / "dataset_256" / "gt_ois"
 ALIGNED_COLOR = ROOT / "data" / "aligned" / "gt_ois" / "color"
 DECODED_FRAMES = ROOT / "data" / "decoded_frames"
 
@@ -31,22 +30,12 @@ SPLIT_EXPORT_MAP = {
     "Testing": "test",
 }
 
-# Stratified distribution targets (Figure 9) — 500 total pairs
-STRATIFIED_QUOTAS = {
-    "Training":   {"Handshake": 100, "Vibration": 100, "Sliding": 100},  # 300
-    "Validation": {"Handshake": 34,  "Vibration": 33,  "Sliding": 33},   # 100
-    "Testing":    {"Handshake": 34,  "Vibration": 33,  "Sliding": 33},   # 100
-}
-
 LOG_DIR = ROOT / "logs"
 LAPLACIAN_DIR = LOG_DIR / "laplacian"
-OVERRIDES_CSV = LOG_DIR / "scene_overrides.csv"
+SPLIT_ASSIGNMENTS_CSV = LOG_DIR / "split_assignments.csv"
 FRAME_OVERRIDE_LOG = LOG_DIR / "frame_override_log.csv"
 LOG_BACKUP_DIR = LOG_DIR / "backups"
 DATASET_ROOT = ROOT / "data" / "dataset"
-SPLIT_ASSIGNMENTS_CSV = LOG_DIR / "split_assignments.csv"
-FINAL_DATASET_ROOT = ROOT / "data" / "final_dataset"
-SCENE_SETS_DIR = LOG_DIR / "scene_sets"
 
 FLOW_THRESHOLD = 15.0
 SSIM_THRESHOLD = 0.70
@@ -159,148 +148,43 @@ def extract_capture_number(capture):
     return match.group(1) if match else capture
 
 
-# ---- Overrides Handling ----
-def load_overrides():
-    if OVERRIDES_CSV.exists():
+# ---- Assignments Handling ----
+def load_assignments():
+    if SPLIT_ASSIGNMENTS_CSV.exists():
         try:
-            df = pd.read_csv(OVERRIDES_CSV)
+            df = pd.read_csv(SPLIT_ASSIGNMENTS_CSV)
             if "reviewer" not in df.columns:
                 df["reviewer"] = ""
-            return df.drop_duplicates(subset=["scene", "override_type"], keep="last")
+            return df.drop_duplicates(subset=["scene", "assignment_type"], keep="last")
         except pd.errors.EmptyDataError:
             pass
-    return pd.DataFrame(columns=["scene", "override_type", "old_value", "new_value", "timestamp", "reviewer"])
+    return pd.DataFrame(columns=["scene", "assignment_type", "old_value", "new_value", "timestamp", "reviewer"])
 
 
-def save_override(scene, override_type, old_value, new_value, reviewer=""):
+def save_assignment(scene, assignment_type, old_value, new_value, reviewer=""):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     new_row = pd.DataFrame([{
         "scene": scene,
-        "override_type": override_type,
+        "assignment_type": assignment_type,
         "old_value": old_value,
         "new_value": new_value,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "reviewer": reviewer
     }])
     
-    if OVERRIDES_CSV.exists():
+    if SPLIT_ASSIGNMENTS_CSV.exists():
         try:
-            df = pd.read_csv(OVERRIDES_CSV)
+            df = pd.read_csv(SPLIT_ASSIGNMENTS_CSV)
             if "reviewer" not in df.columns:
                 df["reviewer"] = ""
                 df = pd.concat([df, new_row], ignore_index=True)
-                df.to_csv(OVERRIDES_CSV, index=False)
+                df.to_csv(SPLIT_ASSIGNMENTS_CSV, index=False)
             else:
-                new_row.to_csv(OVERRIDES_CSV, mode="a", header=False, index=False)
+                new_row.to_csv(SPLIT_ASSIGNMENTS_CSV, mode="a", header=False, index=False)
         except pd.errors.EmptyDataError:
-            new_row.to_csv(OVERRIDES_CSV, index=False)
-    else:
-        new_row.to_csv(OVERRIDES_CSV, index=False)
-
-
-def save_assignment(scene, field, old_value, new_value, reviewer=""):
-    """Append a split-assignment row to the dedicated assignments CSV."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    new_row = pd.DataFrame([{
-        "scene": scene,
-        "field": field,
-        "old_value": old_value,
-        "new_value": new_value,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "reviewer": reviewer,
-    }])
-    if SPLIT_ASSIGNMENTS_CSV.exists():
-        new_row.to_csv(SPLIT_ASSIGNMENTS_CSV, mode="a", header=False, index=False)
+            new_row.to_csv(SPLIT_ASSIGNMENTS_CSV, index=False)
     else:
         new_row.to_csv(SPLIT_ASSIGNMENTS_CSV, index=False)
-
-
-# ---- Scene Set Management ----
-def list_scene_sets():
-    SCENE_SETS_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(p.stem for p in SCENE_SETS_DIR.glob("*.json"))
-
-def load_scene_set(name):
-    path = SCENE_SETS_DIR / f"{name}.json"
-    if not path.exists():
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_scene_set(name, data):
-    SCENE_SETS_DIR.mkdir(parents=True, exist_ok=True)
-    data["modified"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    path = SCENE_SETS_DIR / f"{name}.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-def delete_scene_set(name):
-    path = SCENE_SETS_DIR / f"{name}.json"
-    if path.exists():
-        path.unlink()
-
-def create_new_scene_set(name, keep_scenes_df, creator=""):
-    scenes = {}
-    for _, row in keep_scenes_df.iterrows():
-        scenes[row["scene"]] = {"status": "Included", "split": "Unassigned"}
-    return {
-        "name": name,
-        "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "modified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "created_by": creator,
-        "scenes": scenes,
-    }
-
-def list_final_datasets():
-    if not FINAL_DATASET_ROOT.exists():
-        return []
-    return sorted(d.name for d in FINAL_DATASET_ROOT.iterdir() if d.is_dir())
-
-def export_dataset_v2(scene_set_data, source_root, dataset_name):
-    """Export included scenes from a scene set into final_dataset/<dataset_name>/."""
-    export_root = FINAL_DATASET_ROOT / dataset_name
-    manifest = []
-    included = {
-        k: v for k, v in scene_set_data["scenes"].items()
-        if str(v.get("status", "")).lower() in ["include", "included"] and v.get("split") in SPLIT_EXPORT_MAP
-    }
-    if not included:
-        return pd.DataFrame()
-    for ds_type in ["ois", "nonois"]:
-        for split_key in SPLIT_EXPORT_MAP.values():
-            (export_root / ds_type / split_key / "input").mkdir(parents=True, exist_ok=True)
-            (export_root / ds_type / split_key / "target").mkdir(parents=True, exist_ok=True)
-    for split_label, split_key in SPLIT_EXPORT_MAP.items():
-        split_scenes = sorted(
-            [s for s, d in included.items() if d["split"] == split_label],
-            key=lambda s: parse_scene(s)["scene_number"],
-        )
-        for idx, scene in enumerate(split_scenes, start=1):
-            number = f"{idx:03d}"
-            scene_dir = resolve_scene_dir(source_root, scene)
-            for ds_type, blur_file, sharp_file in [
-                ("ois", "ois_blur.jpg", "ois_sharp.jpg"),
-                ("nonois", "nonois_blur.jpg", "nonois_sharp.jpg"),
-            ]:
-                input_src = scene_dir / blur_file
-                target_src = scene_dir / sharp_file
-                input_dst = export_root / ds_type / split_key / "input" / f"{number}.jpg"
-                target_dst = export_root / ds_type / split_key / "target" / f"{number}.jpg"
-                input_ok = input_src.exists()
-                target_ok = target_src.exists()
-                if input_ok:
-                    shutil.copy2(str(input_src), str(input_dst))
-                if target_ok:
-                    shutil.copy2(str(target_src), str(target_dst))
-                manifest.append({
-                    "scene": scene, "split": split_key, "dataset": ds_type,
-                    "number": number, "input_exists": input_ok, "target_exists": target_ok,
-                })
-    manifest_df = pd.DataFrame(manifest)
-    manifest_df.to_csv(export_root / "manifest.csv", index=False)
-    with open(export_root / "scene_set.json", "w", encoding="utf-8") as f:
-        json.dump(scene_set_data, f, indent=2, ensure_ascii=False)
-    return manifest_df
 
 
 st.markdown(
@@ -425,6 +309,12 @@ st.markdown(
         font-weight: 700; 
         margin-top: 0.2rem;
     }
+
+    /* Disable typing in all dropdowns (selectbox and multiselect) */
+    div[data-baseweb="select"] input {
+        caret-color: transparent !important;
+        pointer-events: none !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -480,7 +370,7 @@ def log_signature():
             LOG_DIR / "scene_selection_log.csv",
             LOG_DIR / "interpolation_log.csv",
             LOG_DIR / "manual_review.csv",
-            OVERRIDES_CSV,
+            SPLIT_ASSIGNMENTS_CSV,
             FRAME_OVERRIDE_LOG,
         )
     )
@@ -583,7 +473,7 @@ def run_scene_pipeline(scene, stage="both"):
         rcode = max(rcode, result.returncode)
 
     if stage in ("interp", "both"):
-        cmd = [sys.executable, str(script_root / "scripts" / "Interpolation" / "interpolate.py"), "--scene", scene]
+        cmd = [sys.executable, str(script_root / "scripts" / "Interpolation" / "n256.py"), "--scene", scene]
         result = subprocess.run(cmd, cwd=str(script_root), capture_output=True, text=True)
         outputs.append(("Interpolation", result.stdout, result.stderr))
         rcode = max(rcode, result.returncode)
@@ -751,13 +641,13 @@ def build_scene_summary(logs):
         review_group = review.groupby("scene", as_index=False).agg(review_count=("scene", "size"))
         summary = summary.merge(review_group, on="scene", how="left")
 
-    # Apply Manual Overrides for Methods and Splits logically
-    overrides = load_overrides()
-    if not overrides.empty:
-        split_overrides = overrides[overrides["override_type"] == "split"].set_index("scene")["new_value"].to_dict()
-        method_overrides = overrides[overrides["override_type"] == "method"].set_index("scene")["new_value"].to_dict()
-        summary["split"] = summary.apply(lambda row: split_overrides.get(row["scene"], row["split"]), axis=1)
-        summary["method"] = summary.apply(lambda row: method_overrides.get(row["scene"], row["method"]), axis=1)
+    # Apply Manual Assignments for Methods and Splits logically
+    assignments = load_assignments()
+    if not assignments.empty:
+        split_assignments_map = assignments[assignments["assignment_type"] == "split"].set_index("scene")["new_value"].to_dict()
+        method_assignments_map = assignments[assignments["assignment_type"] == "method"].set_index("scene")["new_value"].to_dict()
+        summary["split"] = summary.apply(lambda row: split_assignments_map.get(row["scene"], row["split"]), axis=1)
+        summary["method"] = summary.apply(lambda row: method_assignments_map.get(row["scene"], row["method"]), axis=1)
 
     defaults = {
         "max_flow": pd.NA,
@@ -783,7 +673,7 @@ def build_scene_summary(logs):
         ),
         axis=1,
     )
-    summary["has_dataset_target"] = summary["scene"].map(lambda s: has_named_images(DATASET_TARGET, s))
+    summary["has_dataset_256"] = summary["scene"].map(lambda s: has_named_images(DATASET_256, s))
     summary["has_aligned_color"] = summary["scene"].map(lambda s: has_named_images(ALIGNED_COLOR, s))
     summary["has_ois_laplacian"] = summary["capture"].map(
         lambda c: laplacian_csv_path(c, "ois") is not None
@@ -804,7 +694,7 @@ def build_scene_summary(logs):
         | summary["failed_count"].fillna(0).gt(0)
     )
     summary["missing_assets"] = ~(
-        summary["has_dataset_target"]
+        summary["has_dataset_256"]
         & summary["has_aligned_color"]
         & summary["has_ois_laplacian"]
         & summary["has_nonois_laplacian"]
@@ -814,358 +704,6 @@ def build_scene_summary(logs):
     summary = summary[summary["method"].isin(["Sliding", "Vibration", "Handshake"])]
     
     return summary
-
-
-# -------------------------------------------------------------------------------------
-# Perceptual Hash & Scene Grouping
-# -------------------------------------------------------------------------------------
-
-def compute_phash(image_path, hash_size=8):
-    """Compute perceptual hash for an image using DCT."""
-    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        return None
-    resized = cv2.resize(img, (hash_size * 4, hash_size * 4), interpolation=cv2.INTER_AREA)
-    dct = cv2.dct(np.float32(resized))
-    dct_low = dct[:hash_size, :hash_size]
-    median = np.median(dct_low)
-    return (dct_low > median).flatten()
-
-
-def hamming_distance(h1, h2):
-    """Compute Hamming distance between two binary hash arrays."""
-    if h1 is None or h2 is None:
-        return 64
-    return int(np.sum(h1 != h2))
-
-
-@st.cache_data(show_spinner="Computing scene fingerprints...")
-def compute_all_phashes(_scenes_tuple, source_root_str):
-    """Compute pHash for every scene's OIS Sharp image. Accepts a tuple for cacheability."""
-    hashes = {}
-    source_root = Path(source_root_str)
-    for scene in _scenes_tuple:
-        scene_dir = resolve_scene_dir(source_root, scene)
-        img_path = scene_dir / "ois_sharp.jpg"
-        if img_path.exists():
-            h = compute_phash(img_path)
-            if h is not None:
-                hashes[scene] = h
-    return hashes
-
-
-def find_similar_pairs(hashes, threshold=14):
-    """Return pairs of scenes with Hamming distance <= threshold, sorted by distance."""
-    scenes = list(hashes.keys())
-    pairs = []
-    for i in range(len(scenes)):
-        for j in range(i + 1, len(scenes)):
-            dist = hamming_distance(hashes[scenes[i]], hashes[scenes[j]])
-            if dist <= threshold:
-                pairs.append((scenes[i], scenes[j], dist))
-    return sorted(pairs, key=lambda x: x[2])
-
-
-def cluster_pairs_into_groups(pairs):
-    """Use Union-Find to cluster similar-scene pairs into groups."""
-    parent = {}
-
-    def find(x):
-        if x not in parent:
-            parent[x] = x
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for s1, s2, _ in pairs:
-        union(s1, s2)
-
-    groups = {}
-    for scene in parent:
-        root = find(scene)
-        if root not in groups:
-            groups[root] = []
-        groups[root].append(scene)
-
-    result = {}
-    for idx, (_, members) in enumerate(sorted(groups.items()), start=1):
-        if len(members) >= 2:
-            result[f"group_{idx:03d}"] = sorted(members)
-    return result
-
-
-# -------------------------------------------------------------------------------------
-# Quota & Validation Helpers
-# -------------------------------------------------------------------------------------
-
-def compute_quota_status(scenes_data):
-    """Return dict of {(split, method): count} for included+assigned scenes."""
-    counts = {}
-    for sc, data in scenes_data.items():
-        status = str(data.get("status", "")).lower()
-        if status not in ["include", "included"]:
-            continue
-        split = data.get("split", "Unassigned")
-        if split not in SPLIT_EXPORT_MAP:
-            continue
-        method = parse_scene(sc)["method"]
-        key = (split, method)
-        counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
-def compute_unassigned_by_method(scenes_data):
-    """Return dict of {method: count} for included+unassigned scenes."""
-    counts = {}
-    for sc, data in scenes_data.items():
-        status = str(data.get("status", "")).lower()
-        if status not in ["include", "included"]:
-            continue
-        if data.get("split", "Unassigned") == "Unassigned":
-            method = parse_scene(sc)["method"]
-            counts[method] = counts.get(method, 0) + 1
-    return counts
-
-
-def validate_split_groups(scenes_data, groups):
-    """Check if any group has members in different splits. Returns violations list."""
-    violations = []
-    for group_id, members in groups.items():
-        splits_in_group = set()
-        for sc in members:
-            sc_data = scenes_data.get(sc, {})
-            split = sc_data.get("split", "Unassigned")
-            if split != "Unassigned":
-                splits_in_group.add(split)
-        if len(splits_in_group) > 1:
-            violations.append({
-                "group": group_id,
-                "members": members,
-                "splits": sorted(splits_in_group),
-            })
-    return violations
-
-
-def validate_pre_export(scenes_data, groups, source_root):
-    """Run all pre-export checks. Returns list of {check, status, detail} dicts."""
-    checks = []
-    counts = compute_quota_status(scenes_data)
-    methods = ["Handshake", "Vibration", "Sliding"]
-    splits = ["Training", "Validation", "Testing"]
-
-    # 1. Quota check
-    all_met = True
-    quota_details = []
-    for split in splits:
-        for method in methods:
-            current = counts.get((split, method), 0)
-            target = STRATIFIED_QUOTAS.get(split, {}).get(method, 0)
-            if current != target:
-                all_met = False
-                quota_details.append(f"{split}/{method}: {current}/{target}")
-    checks.append({
-        "check": "Quota targets met",
-        "status": "pass" if all_met else "warn",
-        "detail": "All cells match targets" if all_met else "; ".join(quota_details),
-    })
-
-    # 2. Total count
-    total = sum(counts.values())
-    checks.append({
-        "check": "Total assigned = 500",
-        "status": "pass" if total == 500 else "warn",
-        "detail": f"{total}/500 assigned",
-    })
-
-    # 3. Group integrity
-    violations = validate_split_groups(scenes_data, groups)
-    checks.append({
-        "check": "No cross-split group leaks",
-        "status": "pass" if not violations else "fail",
-        "detail": "All groups intact" if not violations else f"{len(violations)} group(s) split across sets",
-    })
-
-    # 4. Missing images
-    missing = []
-    for sc, data in scenes_data.items():
-        status = str(data.get("status", "")).lower()
-        if status not in ["include", "included"]:
-            continue
-        if data.get("split", "Unassigned") == "Unassigned":
-            continue
-        scene_dir = resolve_scene_dir(source_root, sc)
-        for img in ["ois_blur.jpg", "ois_sharp.jpg", "nonois_blur.jpg", "nonois_sharp.jpg"]:
-            if not (scene_dir / img).exists():
-                missing.append(f"{sc}/{img}")
-    checks.append({
-        "check": "No missing image files",
-        "status": "pass" if not missing else "fail",
-        "detail": "All images present" if not missing else f"{len(missing)} file(s) missing",
-    })
-
-    return checks
-
-
-
-
-
-import random
-
-def shuffle_fill_all(scenes_data, groups):
-    """Auto-distribute all unassigned+included scenes to meet quotas, treating groups atomically. Returns assignment dict."""
-    assignments = {}
-    scene_to_group = {}
-    for gid, members in groups.items():
-        for m in members:
-            scene_to_group[m] = gid
-
-    counts = compute_quota_status(scenes_data)
-    
-    # Collect all unassigned scenes into atomic units
-    unassigned_units = [] # list of lists of scenes
-    seen = set()
-    for sc, d in scenes_data.items():
-        if sc in seen:
-            continue
-        status = str(d.get("status", "")).lower()
-        if status not in ["include", "included"]:
-            continue
-        if d.get("split", "Unassigned") != "Unassigned":
-            continue
-            
-        gid = scene_to_group.get(sc)
-        if gid:
-            unit = [m for m in groups[gid] if m in scenes_data and scenes_data[m].get("split", "Unassigned") == "Unassigned" and str(scenes_data[m].get("status", "")).lower() in ["include", "included"]]
-            for m in unit:
-                seen.add(m)
-            if unit:
-                unassigned_units.append(unit)
-        else:
-            seen.add(sc)
-            unassigned_units.append([sc])
-            
-    random.shuffle(unassigned_units)
-    unassigned_units.sort(key=len, reverse=True) # Place larger groups first
-    splits_order = ["Training", "Validation", "Testing"]
-    methods = ["Handshake", "Vibration", "Sliding"]
-    
-    for unit in unassigned_units:
-        # Find the best split to put this unit in
-        # The best split is the one that needs these methods the most, WITHOUT overshooting
-        best_split = None
-        best_score = -9999
-        
-        for split in splits_order:
-            fits_strictly = True
-            for sc in unit:
-                m = parse_scene(sc)["method"]
-                if m in methods:
-                    target = STRATIFIED_QUOTAS.get(split, {}).get(m, 0)
-                    current = counts.get((split, m), 0)
-                    if current + 1 > target:
-                        fits_strictly = False
-                        break
-            
-            if fits_strictly:
-                score = 0
-                for sc in unit:
-                    m = parse_scene(sc)["method"]
-                    if m in methods:
-                        target = STRATIFIED_QUOTAS.get(split, {}).get(m, 0)
-                        current = counts.get((split, m), 0)
-                        needed = target - current
-                        score += needed # Higher needed = better fit
-                
-                if score > best_score:
-                    best_score = score
-                    best_split = split
-                
-        if best_split:
-            for sc in unit:
-                assignments[sc] = best_split
-                m = parse_scene(sc)["method"]
-                counts[(best_split, m)] = counts.get((best_split, m), 0) + 1
-
-    return assignments
-
-
-def render_quota_dashboard(scenes_data):
-    """Render the stratified distribution tracker as an HTML table."""
-    counts = compute_quota_status(scenes_data)
-    unassigned = compute_unassigned_by_method(scenes_data)
-    methods = ["Handshake", "Vibration", "Sliding"]
-    splits = ["Training", "Validation", "Testing"]
-
-    rows_html = []
-    for split in splits:
-        cells = []
-        total_c, total_t = 0, 0
-        for method in methods:
-            c = counts.get((split, method), 0)
-            t = STRATIFIED_QUOTAS.get(split, {}).get(method, 0)
-            total_c += c
-            total_t += t
-            pct = min(100, int(c / t * 100)) if t > 0 else 0
-            if c > t:
-                color, bar = "#ef4444", "#ef4444"
-                extra = ' <span style="color:#ef4444;font-size:0.65rem;">OVER</span>'
-            elif c == t:
-                color, bar, extra = "#22c55e", "#22c55e", ""
-            elif c >= t * 0.5:
-                color, bar, extra = "#f59e0b", "#f59e0b", ""
-            else:
-                color = "#ef4444" if c > 0 else "var(--textColor)"
-                bar = "rgba(128,128,128,0.3)"
-                extra = ""
-            cells.append(
-                f'<td style="padding:0.5rem 0.6rem;text-align:center;">'
-                f'<div style="font-weight:700;font-size:1rem;color:{color};">{c}<span style="opacity:0.4;font-weight:400;">/{t}</span>{extra}</div>'
-                f'<div style="background:rgba(128,128,128,0.15);border-radius:999px;height:5px;margin-top:0.2rem;overflow:hidden;">'
-                f'<div style="background:{bar};height:100%;width:{pct}%;border-radius:999px;"></div></div></td>'
-            )
-        tot_color = "#22c55e" if total_c >= total_t else "#f59e0b" if total_c >= total_t * 0.5 else "var(--textColor)"
-        split_colors = {"Training": "#3b82f6", "Validation": "#8b5cf6", "Testing": "#f59e0b"}
-        rows_html.append(
-            f'<tr style="border-bottom:1px solid rgba(128,128,128,0.08);">'
-            f'<td style="padding:0.5rem 0.6rem;font-weight:700;color:{split_colors.get(split, "var(--textColor)")};">{split}</td>'
-            + "".join(cells)
-            + f'<td style="padding:0.5rem 0.6rem;text-align:center;font-weight:700;color:{tot_color};">{total_c}/{total_t}</td></tr>'
-        )
-
-    # Unassigned row
-    u_cells = []
-    total_u = 0
-    for method in methods:
-        cnt = unassigned.get(method, 0)
-        total_u += cnt
-        u_cells.append(f'<td style="padding:0.5rem 0.6rem;text-align:center;opacity:0.5;">{cnt}</td>')
-    rows_html.append(
-        f'<tr><td style="padding:0.5rem 0.6rem;font-weight:600;opacity:0.5;">Unassigned</td>'
-        + "".join(u_cells)
-        + f'<td style="padding:0.5rem 0.6rem;text-align:center;opacity:0.5;">{total_u}</td></tr>'
-    )
-
-    th_style = 'style="text-align:center;padding:0.4rem 0.6rem;font-size:0.7rem;text-transform:uppercase;opacity:0.4;letter-spacing:0.5px;"'
-    st.markdown(
-        '<div style="margin-bottom:1.2rem;padding:0.8rem 1rem;background:var(--secondaryBackgroundColor);'
-        'border-radius:10px;border:1px solid rgba(128,128,128,0.15);">'
-        '<div style="font-weight:700;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px;'
-        'opacity:0.5;margin-bottom:0.6rem;">Stratified Distribution Tracker</div>'
-        '<table style="width:100%;border-collapse:collapse;">'
-        '<tr style="border-bottom:2px solid rgba(128,128,128,0.15);">'
-        f'<th style="text-align:left;padding:0.4rem 0.6rem;font-size:0.7rem;text-transform:uppercase;opacity:0.4;">Split</th>'
-        f'<th {th_style}>Handshake</th><th {th_style}>Vibration</th><th {th_style}>Sliding</th>'
-        f'<th {th_style}>Total</th></tr>'
-        + "".join(rows_html)
-        + '</table></div>',
-        unsafe_allow_html=True,
-    )
 
 
 # -------------------------------------------------------------------------------------
@@ -2036,8 +1574,8 @@ def go_next():
     st.session_state["nav_scene"] = filtered_scenes[min(len(filtered_scenes)-1, cur_idx + 1)]
 
 nav_col1, nav_col2 = selector_container.columns(2)
-nav_col1.button("< Previous", on_click=go_prev, use_container_width=True, help="Shortcut to jump to the previous scene in your filtered list")
-nav_col2.button("Next >", on_click=go_next, use_container_width=True, help="Shortcut to jump to the next scene in your filtered list")
+nav_col1.button("◀ Previous", on_click=go_prev, use_container_width=True, help="Shortcut to jump to the previous scene in your filtered list")
+nav_col2.button("Next ▶", on_click=go_next, use_container_width=True, help="Shortcut to jump to the next scene in your filtered list")
 
 scene_row = filtered[filtered["scene"] == scene].iloc[0]
 scene_position = filtered.index[filtered["scene"] == scene][0] + 1
@@ -2074,7 +1612,7 @@ status_container.metric("Current Review", current_review_status if current_revie
 
 
 asset_status = {
-    "Interpolated Images": bool(scene_row["has_dataset_target"]),
+    "Interpolated Images": bool(scene_row["has_dataset_256"]),
     "Aligned Images": bool(scene_row["has_aligned_color"]),
     "OIS Laplacian Scores": bool(scene_row["has_ois_laplacian"]),
     "Non-OIS Laplacian Scores": bool(scene_row["has_nonois_laplacian"]),
@@ -2330,11 +1868,11 @@ with main_tabs[0]:
             section_header("Selected Frames", level="h4")
             st.dataframe(selection_table, use_container_width=True, hide_index=True)
 
-        render_scene_image_grid("Final Dataset", DATASET_TARGET, scene, selection_row)
+        render_scene_image_grid("Final Dataset", DATASET_256, scene, selection_row)
 
     with scene_tabs[2]:
         render_scene_image_grid("Aligned Outputs", ALIGNED_COLOR, scene, selection_row)
-        render_scene_image_grid("Interpolated Target Outputs", DATASET_TARGET, scene, selection_row)
+        render_scene_image_grid("Interpolated 256 Outputs", DATASET_256, scene, selection_row)
 
     with scene_tabs[1]:
         selection_df = logs.get("selection", pd.DataFrame())
@@ -2524,7 +2062,7 @@ with main_tabs[0]:
                     with row_cols[2]:
                         rev_text = row.get("reviewer", "")
                         if pd.notna(rev_text) and rev_text:
-                            st.markdown(f"<div style='font-size: 0.9rem; color: var(--textColor); opacity: 0.8;'>User: {html.escape(str(rev_text))}</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='font-size: 0.9rem; color: var(--textColor); opacity: 0.8;'>👤 {html.escape(str(rev_text))}</div>", unsafe_allow_html=True)
                         else:
                             st.markdown("<div style='opacity: 0.5; font-style: italic; font-size: 0.85rem;'>-</div>", unsafe_allow_html=True)
                     
@@ -2575,7 +2113,7 @@ with main_tabs[0]:
                     cur_f = cur_frames.get(ft)
                     if cur_f:
                         st.caption(cur_f)
-                        img_path = resolve_scene_dir(DATASET_TARGET, scene) / f"{ft}.jpg"
+                        img_path = resolve_scene_dir(DATASET_256, scene) / f"{ft}.jpg"
                         if img_path.exists():
                             st.image(str(img_path), use_container_width=True)
                         else:
@@ -2583,7 +2121,7 @@ with main_tabs[0]:
                                 '<div style="aspect-ratio:1;display:flex;align-items:center;'
                                 'justify-content:center;background:rgba(128,128,128,0.08);'
                                 'border:1px dashed rgba(128,128,128,0.25);border-radius:6px;'
-                                'font-size:0.75rem;opacity:0.5;">No interpolated output</div>',
+                                'font-size:0.75rem;opacity:0.5;">No 256 output</div>',
                                 unsafe_allow_html=True,
                             )
                     else:
@@ -2614,31 +2152,24 @@ with main_tabs[0]:
                         return None
                     return row_match["score"].iloc[0]
 
-                def lap_direction(fname):
+                def lap_dir(fname):
                     if lap_df is None or "direction" not in lap_df.columns:
                         return None
-                    row_match = lap_df[lap_df["frame"] == fname]
-                    if row_match.empty:
+                    match = lap_df[lap_df["frame"] == fname]
+                    if match.empty:
                         return None
-                    val = row_match["direction"].iloc[0]
-                    if pd.isna(val):
-                        return None
-                    return str(val)
+                    return match["direction"].iloc[0]
 
                 def fmt_option(fname, frames=frames, cur_frame=cur_f, method=scene_row.get("method")):
                     score = lap_score(fname)
                     score_str = f"  [Lap: {score:.1f}]" if score is not None else ""
 
-                    dir_str = ""
-                    try:
-                        if method == "Sliding":
-                            direction = lap_direction(fname)
-                            if direction:
-                                dir_str = f"  [{direction.upper()}]"
-                    except Exception:
-                        dir_str = ""
-
-                    return f"{fname}{dir_str}{score_str}"
+                    if method == "Sliding":
+                        direction = lap_dir(fname)
+                        dir_str = f"  [{direction}]" if direction else "  [?]"
+                        return f"{fname}{dir_str}{score_str}"
+                    else:
+                        return f"{fname}{score_str}"
 
                 cur_f = cur_frames.get(ft)
                 default_idx = frames.index(cur_f) if cur_f in frames else 0
@@ -2700,7 +2231,7 @@ with main_tabs[0]:
             section_header("Re-run Pipeline for This Scene", level="h4")
             st.markdown(
                 "After applying frame overrides, re-run alignment and/or interpolation "
-                "to regenerate the aligned JPGs and 1080px outputs for this scene."
+                "to regenerate the aligned JPGs and 256px outputs for this scene."
             )
             pipeline_cols = st.columns(3)
             run_stage = None
@@ -2749,911 +2280,318 @@ with main_tabs[0]:
 
 
 
-    # ======================================================================================
-    # TAB 2: SPLIT ASSIGNMENT & EXPORT
-    # ======================================================================================
-    with main_tabs[1]:
-        sa_tabs = st.tabs(["Scene Set Builder", "Export Dataset"])
+# ======================================================================================
+# TAB 2: SPLIT ASSIGNMENT & EXPORT
+# ======================================================================================
+with main_tabs[1]:
+    sa_tabs = st.tabs(["Assign Splits", "Export Dataset"])
 
-        # ------------------------------------------------------------------
-        # SUB-TAB A: SCENE SET BUILDER
-        # ------------------------------------------------------------------
-        with sa_tabs[0]:
-            section_header("Scene Set Builder", level="h3", top_margin="0rem")
-            st.markdown(
-                "Designate **scene sets** by curating collections of KEEP scenes. "
-                "Use this interface to manage which scenes are included in specific dataset versions "
-                "and define their split assignments for streamlined data organization."
+    # ------------------------------------------------------------------
+    # SUB-TAB A: ASSIGN SPLITS
+    # ------------------------------------------------------------------
+    with sa_tabs[0]:
+        section_header("Split Assignment", level="h3", top_margin="0rem")
+        st.markdown(
+            "Assign each **KEEP**-reviewed scene to a dataset split — **Training**, **Validation**, or **Testing**. "
+            "The 4 final output images are shown for each scene so you can confirm quality before committing. "
+            "Scenes still marked **Unassigned** will be skipped during export."
+        )
+
+        keep_scenes_for_split = filtered[filtered["review_status"] == "KEEP"].copy()
+
+        if keep_scenes_for_split.empty:
+            st.info(
+                "No scenes have been marked as **KEEP** yet. "
+                "Go to the **Scene Inspector** tab, review each scene, then come back here."
             )
+        else:
+            # Current split assignment map
+            cur_assignments = load_assignments()
+            split_assignment_map = {}
+            if not cur_assignments.empty:
+                split_assignment_map = (
+                    cur_assignments[cur_assignments["assignment_type"] == "split"]
+                    .set_index("scene")["new_value"]
+                    .to_dict()
+                )
 
-            all_keep_scenes = summary[summary["review_status"] == "KEEP"].copy()
+            method_groups = sorted(keep_scenes_for_split["method"].unique())
 
-            if all_keep_scenes.empty:
-                st.info("No scenes marked as **KEEP** yet. Review scenes in the **Scene Inspector** first.")
-            else:
-                existing_sets = list_scene_sets()
+            # Quick status banner
+            total_keep_count = len(keep_scenes_for_split)
+            assigned_count = sum(
+                1 for _, r in keep_scenes_for_split.iterrows()
+                if split_assignment_map.get(r["scene"], r["split"]) != "Unassigned"
+            )
+            unassigned_count = total_keep_count - assigned_count
 
-                # ── Create / Load controls ─────────────────────────────────
-                col_create, col_load = st.columns(2)
-                with col_create:
-                    with st.container(border=True):
-                        st.markdown("**Create New Set**")
-                        c1, c2 = st.columns([3, 1])
-                        new_set_name = c1.text_input("New set name", placeholder="e.g. experiment_v1", key="new_set_name_input", label_visibility="collapsed")
-                        if c2.button("Create", use_container_width=True, type="primary"):
-                            name = new_set_name.strip()
-                            if not name:
-                                st.session_state["review_notice"] = {"msg": "Enter a name for the new set.", "type": "flag"}
-                            elif name in existing_sets:
-                                st.session_state["review_notice"] = {"msg": f"Set '{name}' already exists.", "type": "flag"}
-                            else:
-                                new_set = create_new_scene_set(name, all_keep_scenes, reviewer_name)
-                                save_scene_set(name, new_set)
-                                st.session_state["active_set"] = new_set
-                                st.session_state["active_set_name"] = name
-                                st.session_state["review_notice"] = {"msg": f"Created set '{name}' with {len(new_set['scenes'])} scenes.", "type": "keep"}
-                            st.rerun()
+            status_html = (
+                f'<div style="display:flex; gap:1.5rem; flex-wrap:wrap; margin-bottom:1.2rem; '
+                f'padding:1rem 1.4rem; background:var(--secondaryBackgroundColor); '
+                f'border-radius:10px; border:1px solid rgba(128,128,128,0.15);">'
+                f'<div><span style="font-size:1.5rem;font-weight:800;color:#22c55e;">{total_keep_count}</span>'
+                f' <span style="opacity:0.6;font-size:0.8rem;text-transform:uppercase;">Total KEEP</span></div>'
+                f'<div><span style="font-size:1.5rem;font-weight:800;color:#3b82f6;">{assigned_count}</span>'
+                f' <span style="opacity:0.6;font-size:0.8rem;text-transform:uppercase;">Assigned</span></div>'
+                f'<div><span style="font-size:1.5rem;font-weight:800;color:#f59e0b;">{unassigned_count}</span>'
+                f' <span style="opacity:0.6;font-size:0.8rem;text-transform:uppercase;">Unassigned</span></div>'
+                f'</div>'
+            )
+            st.markdown(status_html, unsafe_allow_html=True)
 
-                with col_load:
-                    with st.container(border=True):
-                        st.markdown("**Load Existing Set**")
-                        l1, l2 = st.columns([3, 1])
-                        load_options = ["— None —"] + existing_sets
-                        selected_load = l1.selectbox("Load existing", load_options, key="load_set_sel", label_visibility="collapsed")
-                        if l2.button("Load", use_container_width=True):
-                            if selected_load != "— None —":
-                                loaded = load_scene_set(selected_load)
-                                if loaded:
-                                    st.session_state["active_set"] = loaded
-                                    st.session_state["active_set_name"] = selected_load
-                                    st.session_state["review_notice"] = {"msg": f"Loaded set '{selected_load}'.", "type": "info"}
-                                st.rerun()
-
-                st.markdown("<hr style='margin:0.8rem 0;border-color:rgba(128,128,128,0.15);'>", unsafe_allow_html=True)
-
-                # ── Active set editor ──────────────────────────────────────
-                if "active_set" not in st.session_state:
-                    st.info("Create a new set or load an existing one to begin editing.")
-                else:
-                    active_set = st.session_state["active_set"]
-                    set_name = st.session_state.get("active_set_name", "Untitled")
-
-                    # Sync new KEEP scenes into the set
-                    keep_scene_ids = set(all_keep_scenes["scene"].astype(str))
-                    for _, r in all_keep_scenes.iterrows():
-                        if r["scene"] not in active_set["scenes"]:
-                            active_set["scenes"][r["scene"]] = {"status": "Included", "split": "Unassigned"}
+            # Top controls for bulk select
+            st.markdown(
+                '<div style="padding: 1rem; border: 1px solid rgba(128,128,128,0.2); border-radius: 8px; margin-bottom: 1.5rem;">'
+                '<div style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; text-transform: uppercase;">Bulk Assignment</div>',
+                unsafe_allow_html=True
+            )
+            top_cols = st.columns([3, 2, 5])
+            with top_cols[0]:
+                bulk_split = st.selectbox("Assign to split", SPLIT_OPTIONS, key="bulk_split_target", label_visibility="collapsed")
+            with top_cols[1]:
+                if st.button("Save / Apply", type="primary", use_container_width=True):
+                    # collect selected
+                    selected_scenes = [r["scene"] for _, r in keep_scenes_for_split.iterrows() if st.session_state.get(f"bulk_sel_{r['scene']}")]
+                    if selected_scenes:
+                        for sc in selected_scenes:
+                            current_sp = split_assignment_map.get(sc, keep_scenes_for_split[keep_scenes_for_split["scene"]==sc].iloc[0]["split"])
+                            if bulk_split != current_sp:
+                                save_assignment(sc, "split", current_sp, bulk_split, reviewer_name)
+                        
+                        for sc in selected_scenes:
+                            st.session_state[f"bulk_sel_{sc}"] = False
                             
-                    # Clean up ghost scenes: if a scene is no longer KEEP globally, unassign it
-                    changed = False
-                    for sc in list(active_set["scenes"].keys()):
-                        if str(sc) not in keep_scene_ids:
-                            if active_set["scenes"][sc].get("status", "").lower() in ["include", "included"] or active_set["scenes"][sc].get("split", "Unassigned") != "Unassigned":
-                                active_set["scenes"][sc]["status"] = "Unassigned"
-                                active_set["scenes"][sc]["split"] = "Unassigned"
-                                changed = True
-                                
-                    if changed:
-                        save_scene_set(set_name, active_set)
+                        load_all_logs.clear()
+                        st.session_state["review_notice"] = {"msg": f"Successfully assigned {len(selected_scenes)} scenes to {bulk_split}.", "type": "info"}
+                        st.rerun()
+                    else:
+                        st.warning("No scenes selected (use the checkboxes on the left side).")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-                    scenes_data = active_set["scenes"]
-                    inc_count = sum(1 for v in scenes_data.values() if v.get("status") == "Included")
-                    exc_count = sum(1 for v in scenes_data.values() if v.get("status") == "Excluded")
-                    flg_count = sum(1 for v in scenes_data.values() if v.get("status") == "Flagged")
+            for method in method_groups:
+                method_df = keep_scenes_for_split[
+                    keep_scenes_for_split["method"] == method
+                ].sort_values("scene_number")
 
-                    # Stats banner
-                    st.markdown(
-                        f'<div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem;'
-                        f'padding:1rem 1.4rem;background:var(--secondaryBackgroundColor);'
-                        f'border-radius:10px;border:1px solid rgba(128,128,128,0.15);">'
-                        f'<div style="font-size:1.1rem;font-weight:700;">Set: {html.escape(set_name)}</div>'
-                        f'<div><span style="font-size:1.4rem;font-weight:800;color:#22c55e;">{inc_count}</span>'
-                        f' <span style="opacity:0.6;font-size:0.75rem;text-transform:uppercase;">Included</span></div>'
-                        f'<div><span style="font-size:1.4rem;font-weight:800;color:#ef4444;">{exc_count}</span>'
-                        f' <span style="opacity:0.6;font-size:0.75rem;text-transform:uppercase;">Excluded</span></div>'
-                        f'<div><span style="font-size:1.4rem;font-weight:800;color:#f59e0b;">{flg_count}</span>'
-                        f' <span style="opacity:0.6;font-size:0.75rem;text-transform:uppercase;">Flagged</span></div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+                method_assigned = sum(
+                    1 for _, r in method_df.iterrows()
+                    if split_assignment_map.get(r["scene"], r["split"]) != "Unassigned"
+                )
+                method_label = f"{method}  ·  {method_assigned}/{len(method_df)} assigned"
 
-                    # ── Internal sub-tabs: Scene Status | Split Assignment | Scene Groups ──────
-                    ssb_tabs = st.tabs(["Scene Status", "Split Assignment", "Split Preview", "Scene Groups"])
+                with st.expander(method_label, expanded=True):
+                    # Per-scene cards
+                    for _, r in method_df.iterrows():
+                        sc = r["scene"]
+                        sc_name = r["scene_name"]
+                        current_sp = split_assignment_map.get(sc, r["split"])
+                        sp_idx = SPLIT_OPTIONS.index(current_sp) if current_sp in SPLIT_OPTIONS else 0
 
-                    # ══════════════════════════════════════════════════════
-                    # INTERNAL TAB 1: SCENE STATUS (Include / Exclude / Flag)
-                    # ══════════════════════════════════════════════════════
-                    with ssb_tabs[0]:
-                        # ── Bulk action bar ────────────────────────────────────
-                        with st.container(border=True):
-                            st.markdown("<div style='font-weight:600;margin-bottom:0.8rem;'>Bulk Actions for Selected Scenes</div>", unsafe_allow_html=True)
-                            b_cols = st.columns(2)
+                        row_cols = st.columns([1, 15])
+                        with row_cols[0]:
+                            st.markdown("<div style='margin-top:2.5rem;'></div>", unsafe_allow_html=True)
+                            st.checkbox("Select", key=f"bulk_sel_{sc}", label_visibility="collapsed")
 
-                            with b_cols[0]:
-                                st.caption("Selection")
-                                sel_1, sel_2 = st.columns(2)
-                                if sel_1.button("Select All", use_container_width=True, key="act_sel_all"):
-                                    for sc in scenes_data:
-                                        st.session_state[f"setsel_{set_name}_{sc}"] = True
-                                    st.rerun()
-                                if sel_2.button("Deselect All", use_container_width=True, key="act_desel_all"):
-                                    for sc in scenes_data:
-                                        st.session_state[f"setsel_{set_name}_{sc}"] = False
-                                    st.rerun()
-
-                            with b_cols[1]:
-                                st.caption("Set Status")
-                                stat_1, stat_2 = st.columns([2, 1])
-                                bulk_action = stat_1.selectbox("Action", ["Include", "Exclude", "Flag"], key="set_bulk_action", label_visibility="collapsed")
-                                if stat_2.button("Apply", key="btn_apply_status", use_container_width=True):
-                                    selected = [sc for sc in scenes_data if st.session_state.get(f"setsel_{set_name}_{sc}")]
-                                    if selected:
-                                        action_map = {"Include": "Included", "Exclude": "Excluded", "Flag": "Flagged"}
-                                        new_status_val = action_map[bulk_action]
-                                        for sc in selected:
-                                            scenes_data[sc]["status"] = new_status_val
-                                        save_scene_set(set_name, active_set)
-                                        st.session_state["review_notice"] = {"msg": f"Set {len(selected)} scenes to {new_status_val}.", "type": "info"}
-                                        for sc in selected:
-                                            st.session_state[f"setsel_{set_name}_{sc}"] = False
-                                        st.rerun()
-                                    else:
-                                        st.warning("Select scenes first.")
-
-                        # ── Scene list grouped by method ─────────────────────────
-                        keep_method_map = {}
-                        for _, r in all_keep_scenes.iterrows():
-                            m = r["method"]
-                            if m not in keep_method_map:
-                                keep_method_map[m] = []
-                            keep_method_map[m].append(r)
-
-                        for method in sorted(keep_method_map.keys()):
-                            method_scenes = keep_method_map[method]
-                            method_inc = sum(1 for r in method_scenes if scenes_data.get(r["scene"], {}).get("status") == "Included")
-                            method_label = f"{method}  ·  {method_inc}/{len(method_scenes)} included"
-
-                            with st.expander(method_label, expanded=True):
-                                for r in sorted(method_scenes, key=lambda x: x["scene_number"]):
-                                    sc = r["scene"]
-                                    sc_name = r["scene_name"]
-                                    sc_data = scenes_data.get(sc, {"status": "Included", "split": "Unassigned"})
-                                    status = sc_data["status"]
-                                    if status.lower() == "include": status = "Included"
-                                    elif status.lower() == "exclude": status = "Excluded"
-                                    elif status.lower() == "flag": status = "Flagged"
-                                    status_badge_cls = {"Included": "badge-keep", "Excluded": "badge-reject", "Flagged": "badge-flag"}.get(status, "badge-muted")
-
-                                    st.markdown(
-                                        f'<div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.5rem;">'
-                                        f'<div style="font-size:1.05rem;font-weight:700;">{html.escape(sc_name)}</div>'
-                                        f'<span class="dashboard-badge {status_badge_cls}">{status.upper()}</span>'
-                                        f'<div style="font-size:0.8rem;opacity:0.5;">{html.escape(sc)}</div>'
-                                        f'</div>',
-                                        unsafe_allow_html=True,
-                                    )
-
-                                    scene_dir_target = resolve_scene_dir(DATASET_TARGET, sc)
-                                    img_specs = [
-                                        ("OIS Blur", "ois_blur.jpg"),
-                                        ("OIS Sharp", "ois_sharp.jpg"),
-                                        ("Non-OIS Blur", "nonois_blur.jpg"),
-                                        ("Non-OIS Sharp", "nonois_sharp.jpg"),
-                                    ]
-                                    img_cols = st.columns([1, 4, 4, 4, 4])
-                                    with img_cols[0]:
-                                        st.checkbox("sel", key=f"setsel_{set_name}_{sc}", label_visibility="collapsed")
-
-                                    any_image = False
-                                    for img_col, (img_label, img_file) in zip(img_cols[1:], img_specs):
-                                        img_path = scene_dir_target / img_file
-                                        with img_col:
-                                            if img_path.exists():
-                                                st.image(str(img_path), caption=img_label, use_container_width=True)
-                                                any_image = True
-                                            else:
-                                                st.markdown(
-                                                    f'<div style="aspect-ratio:1;display:flex;align-items:center;'
-                                                    f'justify-content:center;background:rgba(128,128,128,0.08);'
-                                                    f'border:1px dashed rgba(128,128,128,0.25);border-radius:6px;'
-                                                    f'font-size:0.75rem;opacity:0.5;text-align:center;padding:0.5rem;">'
-                                                    f'{img_label}<br>Missing</div>',
-                                                    unsafe_allow_html=True,
-                                                )
-
-                                    if not any_image:
-                                        st.caption("No output images found — the pipeline may not have run yet for this scene.")
-
-                                    st.markdown("<hr style='margin:1rem 0 0.6rem 0;border-color:rgba(128,128,128,0.1);'></hr>", unsafe_allow_html=True)
-
-                    # ══════════════════════════════════════════════════════
-                    # INTERNAL TAB 2: SPLIT ASSIGNMENT
-                    # ══════════════════════════════════════════════════════
-                    with ssb_tabs[1]:
-                        section_header("Split Assignment", level="h4", top_margin="0rem")
-                        st.markdown(
-                            "Assign scenes to **Training / Validation / Testing** splits with stratified quotas. "
-                            "Select a target split, check scenes to assign, and track progress against Figure 9 targets."
-                        )
-
-                        # ── Quota Dashboard ─────────────────────────────────
-                        render_quota_dashboard(scenes_data)
-
-                        # ── Distribution Chart ──────────────────────────────
-                        with st.expander("Distribution Chart", expanded=False):
-                            try:
-                                import altair as alt
-                                counts = compute_quota_status(scenes_data)
-                                chart_rows = []
-                                for split in ["Training", "Validation", "Testing"]:
-                                    for method in ["Handshake", "Vibration", "Sliding"]:
-                                        chart_rows.append({"Split": split, "Method": method, "Count": counts.get((split, method), 0), "Type": "Current"})
-                                        chart_rows.append({"Split": split, "Method": method, "Count": STRATIFIED_QUOTAS.get(split, {}).get(method, 0), "Type": "Target"})
-                                cdf = pd.DataFrame(chart_rows)
-                                chart = alt.Chart(cdf).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                                    x=alt.X("Type:N", title=None, axis=alt.Axis(labelAngle=0)),
-                                    y=alt.Y("Count:Q", title="Scenes"),
-                                    color=alt.Color("Type:N", scale=alt.Scale(domain=["Current", "Target"], range=["#3b82f6", "rgba(128,128,128,0.3)"])),
-                                    column=alt.Column("Split:N", title=None),
-                                    row=alt.Row("Method:N", title=None),
-                                    tooltip=["Split:N", "Method:N", "Type:N", "Count:Q"],
-                                ).properties(width=120, height=80)
-                                st.altair_chart(chart)
-                            except Exception:
-                                st.info("Install altair for distribution charts.")
-
-                        st.markdown("<br>", unsafe_allow_html=True)
-
-                        # ── Target Split Selector ───────────────────────────
-                        sp_target_cols = st.columns([2, 1, 1])
-                        with sp_target_cols[0]:
-                            target_split = st.radio(
-                                "Target Split",
-                                ["Training", "Validation", "Testing", "Unassigned"],
-                                horizontal=True,
-                                key="sp_target_split",
-                            )
-                        with sp_target_cols[1]:
-                            show_assigned = st.checkbox("Show already-assigned", value=False, key="sp_show_assigned")
-                        with sp_target_cols[2]:
-                            st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
-
-                        groups = active_set.get("groups", {})
-                        # Build reverse group map for badge display
-                        scene_to_group = {}
-                        for gid, members in groups.items():
-                            for member in members:
-                                scene_to_group[member] = gid
-
-                        # ── Quick-fill Buttons ──────────────────────────────
-                        with st.container(border=True):
-                            st.markdown("<div style='font-weight:600;margin-bottom:0.5rem;'>Quick Actions</div>", unsafe_allow_html=True)
-                            qf_cols = st.columns(5)
-                            with qf_cols[0]:
-                                if st.button("Auto-fill to Quota", use_container_width=True, key="sp_autofill"):
-                                    # Collect unassigned atomic units
-                                    unassigned_units = []
-                                    seen = set()
-                                    for sc, d in scenes_data.items():
-                                        if sc in seen: continue
-                                        if str(d.get("status", "")).lower() not in ["include", "included"]: continue
-                                        if d.get("split", "Unassigned") != "Unassigned": continue
-                                        gid = scene_to_group.get(sc)
-                                        if gid:
-                                            unit = [m for m in groups[gid] if m in scenes_data and scenes_data[m].get("split", "Unassigned") == "Unassigned" and str(scenes_data[m].get("status", "")).lower() in ["include", "included"]]
-                                            for m in unit: seen.add(m)
-                                            if unit: unassigned_units.append(unit)
-                                        else:
-                                            seen.add(sc)
-                                            unassigned_units.append([sc])
-                                    
-                                    import random
-                                    random.shuffle(unassigned_units)
-                                    unassigned_units.sort(key=len, reverse=True) # Place larger groups first
-                                    counts = compute_quota_status(scenes_data)
-                                    filled = 0
-                                    
-                                    for unit in unassigned_units:
-                                        # Strictly ensure we don't overshoot any method target
-                                        can_add = True
-                                        for sc in unit:
-                                            m = parse_scene(sc)["method"]
-                                            target = STRATIFIED_QUOTAS.get(target_split, {}).get(m, 0)
-                                            current = counts.get((target_split, m), 0)
-                                            if current + 1 > target:
-                                                can_add = False
-                                                break
-                                                
-                                        if can_add:
-                                            for sc in unit:
-                                                scenes_data[sc]["split"] = target_split
-                                                m = parse_scene(sc)["method"]
-                                                counts[(target_split, m)] = counts.get((target_split, m), 0) + 1
-                                                filled += 1
-                                                
-                                    if filled:
-                                        save_scene_set(set_name, active_set)
-                                        st.session_state["review_notice"] = {"msg": f"Auto-filled {filled} scene(s) into {target_split}.", "type": "keep"}
-                                    else:
-                                        st.session_state["review_notice"] = {"msg": f"{target_split} quota already met.", "type": "info"}
-                                    st.rerun()
-                            with qf_cols[1]:
-                                if st.button("Shuffle & Fill All", use_container_width=True, key="sp_shuffle"):
-                                    assignments = shuffle_fill_all(scenes_data, groups)
-                                    if assignments:
-                                        for sc, sp in assignments.items():
-                                            scenes_data[sc]["split"] = sp
-                                        save_scene_set(set_name, active_set)
-                                        st.session_state["review_notice"] = {"msg": f"Shuffled {len(assignments)} scene(s) across all splits.", "type": "keep"}
-                                    else:
-                                        st.session_state["review_notice"] = {"msg": "No unassigned scenes to distribute.", "type": "info"}
-                                    st.rerun()
-                            with qf_cols[2]:
-                                if st.button("Check All Visible", use_container_width=True, key="sp_check_all"):
-                                    for sc in scenes_data:
-                                        st.session_state[f"sp_sel_{set_name}_{sc}"] = True
-                                    st.rerun()
-                            with qf_cols[3]:
-                                if st.button("Uncheck All", use_container_width=True, key="sp_uncheck_all"):
-                                    for sc in scenes_data:
-                                        st.session_state[f"sp_sel_{set_name}_{sc}"] = False
-                                    st.rerun()
-                            with qf_cols[4]:
-                                if st.button("Unassign All", use_container_width=True, key="sp_unassign_all"):
-                                    count = 0
-                                    for sc, d in scenes_data.items():
-                                        if d.get("split", "Unassigned") != "Unassigned":
-                                            d["split"] = "Unassigned"
-                                            count += 1
-                                    if count > 0:
-                                        save_scene_set(set_name, active_set)
-                                        st.session_state["review_notice"] = {"msg": f"Unassigned {count} scene(s).", "type": "info"}
-                                    else:
-                                        st.session_state["review_notice"] = {"msg": "All scenes are already unassigned.", "type": "info"}
-                                    st.rerun()
-
-                        st.markdown("<br>", unsafe_allow_html=True)
-
-                        # ── Build method-grouped scene lists ────────────────
-                        METHOD_ORDER = ["Handshake", "Sliding", "Vibration"]
-                        sp_method_map = {m: [] for m in METHOD_ORDER}
-                        for _, r in all_keep_scenes.iterrows():
-                            m = r["method"]
-                            if m in sp_method_map:
-                                sp_method_map[m].append(r)
-                        for m in METHOD_ORDER:
-                            sp_method_map[m] = sorted(sp_method_map[m], key=lambda x: x["scene_number"])
-
-                        METHOD_COLORS = {
-                            "Handshake": "#3b82f6",
-                            "Sliding": "#8b5cf6",
-                            "Vibration": "#f59e0b",
-                        }
-
-                        # ── 3-column method headers with progress ───────────
-                        counts = compute_quota_status(scenes_data)
-                        hdr_cols = st.columns(3)
-                        for hdr_col, method in zip(hdr_cols, METHOD_ORDER):
-                            current = counts.get((target_split, method), 0)
-                            target = STRATIFIED_QUOTAS.get(target_split, {}).get(method, 0)
-                            pct = min(100, int(current / target * 100)) if target > 0 else 0
-                            color = METHOD_COLORS.get(method, "var(--textColor)")
-                            fill_color = "#22c55e" if current >= target else color
-                            hdr_col.markdown(
-                                f'<div style="text-align:center;padding:0.6rem 0.8rem;'
-                                f'background:var(--secondaryBackgroundColor);border-radius:10px;'
-                                f'border:2px solid {color}33;margin-bottom:0.8rem;">'
-                                f'<div style="font-size:1rem;font-weight:800;color:{color};">{method}</div>'
-                                f'<div style="font-size:1.3rem;font-weight:800;color:{fill_color};margin:0.2rem 0;">{current}/{target}</div>'
-                                f'<div style="background:rgba(128,128,128,0.15);border-radius:999px;height:5px;overflow:hidden;">'
-                                f'<div style="background:{fill_color};height:100%;width:{pct}%;border-radius:999px;"></div></div>'
+                        with row_cols[1]:
+                            # Scene card header
+                            st.markdown(
+                                f'<div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.5rem;">'
+                                f'<div style="font-size:1.05rem;font-weight:700;">{html.escape(sc_name)}</div>'
+                                f'<span class="dashboard-badge badge-{"info" if current_sp != "Unassigned" else "muted"}">'
+                                f'{current_sp}</span>'
+                                f'<div style="font-size:0.8rem;opacity:0.5;">{html.escape(sc)}</div>'
                                 f'</div>',
                                 unsafe_allow_html=True,
                             )
 
-                        # ── Row-by-row scene cards ──────────────────────────
-                        sp_filtered_map = {}
-                        for method in METHOD_ORDER:
-                            scenes_list = []
-                            for r in sp_method_map[method]:
-                                sc = r["scene"]
-                                sc_data = scenes_data.get(sc, {"status": "Included", "split": "Unassigned"})
-                                status = str(sc_data.get("status", "")).lower()
-                                if status not in ["include", "included"]:
-                                    continue
-                                split_val = sc_data.get("split", "Unassigned")
-                                if not show_assigned and split_val != "Unassigned":
-                                    continue
-                                scenes_list.append(r)
-                            sp_filtered_map[method] = scenes_list
-
-                        max_scenes = max((len(v) for v in sp_filtered_map.values()), default=0)
-
-                        for row_i in range(max_scenes):
-                            row_cols = st.columns(3)
-                            for col_widget, method in zip(row_cols, METHOD_ORDER):
-                                scenes_in_method = sp_filtered_map[method]
-                                if row_i >= len(scenes_in_method):
-                                    with col_widget:
-                                        st.markdown("<div style='min-height:50px;'></div>", unsafe_allow_html=True)
-                                    continue
-
-                                r = scenes_in_method[row_i]
-                                sc = r["scene"]
-                                sc_name = r["scene_name"]
-                                sc_data = scenes_data.get(sc, {"status": "Included", "split": "Unassigned"})
-                                split_val = sc_data.get("split", "Unassigned")
-                                split_badge_cls = "badge-info" if split_val != "Unassigned" else "badge-muted"
-                                group_id = scene_to_group.get(sc)
-
-                                with col_widget:
-                                    with st.container(border=True):
-                                        chk_col, info_col = st.columns([1, 5])
-                                        with chk_col:
-                                            st.checkbox("sel", key=f"sp_sel_{set_name}_{sc}", label_visibility="collapsed")
-                                        with info_col:
-                                            badges = f'<span class="dashboard-badge {split_badge_cls}" style="font-size:0.65rem;">{split_val}</span>'
-                                            if group_id:
-                                                badges += f' <span class="dashboard-badge badge-warn" style="font-size:0.6rem;">[Group] {group_id}</span>'
-                                            st.markdown(
-                                                f'<div style="font-size:0.9rem;font-weight:700;line-height:1.2;">{html.escape(sc_name)}</div>'
-                                                f'<div style="margin-top:0.2rem;">{badges}</div>',
-                                                unsafe_allow_html=True,
-                                            )
-
-                                        scene_dir_target = resolve_scene_dir(DATASET_TARGET, sc)
-                                        ois_sharp_path = scene_dir_target / "ois_sharp.jpg"
-                                        if ois_sharp_path.exists():
-                                            st.image(str(ois_sharp_path), caption="OIS Sharp", use_container_width=True)
-                                        else:
-                                            st.markdown(
-                                                '<div style="aspect-ratio:4/3;display:flex;align-items:center;'
-                                                'justify-content:center;background:rgba(128,128,128,0.08);'
-                                                'border:1px dashed rgba(128,128,128,0.25);border-radius:6px;'
-                                                'font-size:0.75rem;opacity:0.5;">Missing</div>',
-                                                unsafe_allow_html=True,
-                                            )
-
-                            st.markdown("<hr style='margin:0.3rem 0;border-color:rgba(128,128,128,0.06);'></hr>", unsafe_allow_html=True)
-
-                        # ── Assign Button ───────────────────────────────────
-                        sp_selected = [sc for sc in scenes_data if st.session_state.get(f"sp_sel_{set_name}_{sc}")]
-                        if sp_selected:
-                            group_warnings = []
-                            for sc in sp_selected:
-                                gid = scene_to_group.get(sc)
-                                if gid:
-                                    for member in groups[gid]:
-                                        if member not in sp_selected:
-                                            existing_split = scenes_data.get(member, {}).get("split", "Unassigned")
-                                            if existing_split not in ["Unassigned", target_split]:
-                                                group_warnings.append(f"{parse_scene(member)['scene_name']} ({gid}) is in {existing_split}")
-
-                            if group_warnings:
-                                st.warning(f"[Warning] Group conflict: " + "; ".join(group_warnings[:5]))
-
-                            st.info(f"**{len(sp_selected)} scene(s) selected** — assign to **{target_split}**")
-                            def do_assign():
-                                for sc in sp_selected:
-                                    scenes_data[sc]["split"] = target_split
-                                    gid = scene_to_group.get(sc)
-                                    if gid:
-                                        for member in groups[gid]:
-                                            if member in scenes_data:
-                                                scenes_data[member]["split"] = target_split
-                                save_scene_set(set_name, active_set)
-                                for sc in sp_selected:
-                                    if f"sp_sel_{set_name}_{sc}" in st.session_state:
-                                        st.session_state[f"sp_sel_{set_name}_{sc}"] = False
-                                st.session_state["review_notice"] = {"msg": f"Assigned {len(sp_selected)} scene(s) to {target_split}.", "type": "keep"}
-
-                            st.button(f"Assign {len(sp_selected)} Scene(s) to {target_split}", type="primary", use_container_width=True, key="sp_assign_btn", on_click=do_assign)
-                        else:
-                            st.caption("Check scenes above then click Assign, or use Auto-fill / Shuffle & Fill.")
-
-                        # ── Pre-export Validation ───────────────────────────
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        with st.expander("Pre-export Validation Checklist", expanded=False):
-                            if st.button("Run Validation", use_container_width=True, key="sp_validate"):
-                                checks = validate_pre_export(scenes_data, groups, DATASET_TARGET)
-                                for chk in checks:
-                                    icon = "[OK]" if chk["status"] == "pass" else "[Warning]" if chk["status"] == "warn" else "[Fail]"
-                                    color = "#22c55e" if chk["status"] == "pass" else "#f59e0b" if chk["status"] == "warn" else "#ef4444"
-                                    st.markdown(
-                                        f'<div style="padding:0.5rem 0.8rem;margin-bottom:0.4rem;border-radius:8px;'
-                                        f'border:1px solid {color}33;background:{color}11;">'
-                                        f'{icon} <b>{chk["check"]}</b><br>'
-                                        f'<span style="font-size:0.85rem;opacity:0.7;">{chk["detail"]}</span></div>',
-                                        unsafe_allow_html=True,
-                                    )
-
-                    # ══════════════════════════════════════════════════════
-                    # INTERNAL TAB 3: SPLIT PREVIEW
-                    # ══════════════════════════════════════════════════════
-                    with ssb_tabs[2]:
-                        section_header("Split Preview", level="h4", top_margin="0rem")
-                        st.markdown("Preview the assigned scenes grouped by their visual similarity to verify no identical scenes cross splits.")
-                        
-                        preview_split = st.selectbox("Select Split to Preview", ["Training", "Validation", "Testing", "Unassigned"], key="prev_split")
-                        
-                        prev_scenes = []
-                        for sc, d in scenes_data.items():
-                            if str(d.get("status", "")).lower() not in ["include", "included"]: continue
-                            if d.get("split", "Unassigned") == preview_split:
-                                prev_scenes.append(sc)
-                                
-                        if not prev_scenes:
-                            st.info(f"No included scenes currently assigned to {preview_split}.")
-                        else:
-                            st.caption(f"Showing {len(prev_scenes)} scenes in {preview_split}. Identical scenes (same group) are placed side-by-side.")
-                            
-                            scene_to_group = {}
-                            groups = active_set.get("groups", {})
-                            for gid, members in groups.items():
-                                for m in members: scene_to_group[m] = gid
-                                
-                            def sort_key(s):
-                                return (scene_to_group.get(s, f"Z_{s}"), s)
-                            prev_scenes.sort(key=sort_key)
-                            
-                            p_cols = st.columns(6)
-                            for idx, sc in enumerate(prev_scenes):
-                                with p_cols[idx % 6]:
-                                    scene_dir = resolve_scene_dir(DATASET_TARGET, sc)
-                                    img_path = scene_dir / "ois_sharp.jpg"
-                                    
+                            # 4 output images in one row
+                            scene_dir_256 = resolve_scene_dir(DATASET_256, sc)
+                            img_specs = [
+                                ("OIS Blur", "ois_blur.jpg"),
+                                ("OIS Sharp", "ois_sharp.jpg"),
+                                ("Non-OIS Blur", "nonois_blur.jpg"),
+                                ("Non-OIS Sharp", "nonois_sharp.jpg"),
+                            ]
+                            img_cols = st.columns(4)
+                            any_image = False
+                            for img_col, (img_label, img_file) in zip(img_cols, img_specs):
+                                img_path = scene_dir_256 / img_file
+                                with img_col:
                                     if img_path.exists():
-                                        img_arr = load_display_image(str(img_path))
-                                        st.image(img_arr, use_container_width=True)
+                                        st.image(str(img_path), caption=img_label, use_container_width=True)
+                                        any_image = True
                                     else:
-                                        st.markdown(f"<div style='aspect-ratio:1;background:rgba(128,128,128,0.1);border-radius:6px;display:flex;align-items:center;justify-content:center;color:gray;font-size:0.7rem;margin-bottom:0.2rem;'>No Image</div>", unsafe_allow_html=True)
-                                        
-                                    gid = scene_to_group.get(sc)
-                                    badge = f'<span style="background:rgba(245,158,11,0.2);color:#f59e0b;padding:0.1rem 0.3rem;border-radius:4px;font-size:0.6rem;font-weight:700;">[Group] {gid}</span>' if gid else ""
-                                    st.markdown(f"<div style='text-align:center;font-size:0.75rem;margin-bottom:1rem;'>{parse_scene(sc)['scene_name']}<br>{badge}</div>", unsafe_allow_html=True)
+                                        st.markdown(
+                                            f'<div style="aspect-ratio:1;display:flex;align-items:center;'
+                                            f'justify-content:center;background:rgba(128,128,128,0.08);'
+                                            f'border:1px dashed rgba(128,128,128,0.25);border-radius:6px;'
+                                            f'font-size:0.75rem;opacity:0.5;text-align:center;padding:0.5rem;">'
+                                            f'{img_label}<br>Missing</div>',
+                                            unsafe_allow_html=True,
+                                        )
 
+                            if not any_image:
+                                st.caption(
+                                    "No output images found — the pipeline may not have run yet for this scene."
+                                )
 
-                    # ══════════════════════════════════════════════════════
-                    # INTERNAL TAB 4: SCENE GROUPS
-                    # ══════════════════════════════════════════════════════
-                    with ssb_tabs[3]:
-                        section_header("Scene Groups (Duplicate Detection)", level="h4", top_margin="0rem")
-                        st.markdown(
-                            "Detect visually similar scenes using **perceptual hashing** to prevent data leakage. "
-                            "Grouped scenes are automatically assigned to the **same split** during assignment."
-                        )
-
-                        groups = active_set.get("groups", {})
-
-                        # ── Scan Controls ───────────────────────────────────
-                        with st.container(border=True):
-                            scan_cols = st.columns([2, 1, 1])
-                            with scan_cols[0]:
-                                threshold = st.slider("Similarity Threshold (lower = stricter)", 6, 20, 14, key="phash_threshold",
-                                                      help="Hamming distance threshold. 6=near-exact, 14=loose, 20=very loose")
-                            with scan_cols[1]:
-                                st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
-                                scan_btn = st.button("Scan for Similar Scenes", type="primary", use_container_width=True, key="scan_phash")
-                            with scan_cols[2]:
-                                st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
-                                clear_groups_btn = st.button("Clear All Groups", use_container_width=True, key="clear_groups")
-
-                        if clear_groups_btn:
-                            active_set["groups"] = {}
-                            save_scene_set(set_name, active_set)
-                            st.session_state.pop("detected_pairs", None)
-                            st.session_state["review_notice"] = {"msg": "Cleared all scene groups.", "type": "info"}
-                            st.rerun()
-
-                        if scan_btn:
-                            included_scenes = tuple(
-                                sc for sc, d in scenes_data.items()
-                                if str(d.get("status", "")).lower() in ["include", "included"]
+                            st.markdown(
+                                "<hr style='margin:1rem 0 0.6rem 0;border-color:rgba(128,128,128,0.1);'>",
+                                unsafe_allow_html=True,
                             )
-                            with st.spinner(f"Scanning {len(included_scenes)} scenes..."):
-                                hashes = compute_all_phashes(included_scenes, str(DATASET_TARGET))
-                                pairs = find_similar_pairs(hashes, threshold=threshold)
-                                detected = cluster_pairs_into_groups(pairs)
-                            st.session_state["detected_pairs"] = pairs
-                            st.session_state["detected_groups"] = detected
-                            if detected:
-                                st.session_state["review_notice"] = {"msg": f"Found {len(detected)} group(s) with {len(pairs)} similar pair(s).", "type": "info"}
-                            else:
-                                st.session_state["review_notice"] = {"msg": "No similar scenes detected at this threshold.", "type": "info"}
-                            st.rerun()
 
-                        # ── Show Detected Pairs ─────────────────────────────
-                        detected_groups = st.session_state.get("detected_groups", {})
-                        if detected_groups:
-                            section_header("Detected Similar Groups", level="h4")
-                            st.markdown(f"**{len(detected_groups)} group(s)** detected. Review and confirm to protect against data leakage.")
+            # Save button handling removed since we apply per-scene
+            if unassigned_count == 0:
+                st.write("")
+                st.success("All KEEP scenes are assigned. Head to **Export Dataset** when ready.")
 
-                            for gid, members in detected_groups.items():
-                                with st.expander(f"{gid}: {len(members)} scenes", expanded=True):
-                                    thumb_cols = st.columns(min(len(members), 5))
-                                    for tc, sc in zip(thumb_cols, members[:5]):
-                                        with tc:
-                                            img_path = resolve_scene_dir(DATASET_TARGET, sc) / "ois_sharp.jpg"
-                                            if img_path.exists():
-                                                st.image(str(img_path), caption=parse_scene(sc)["scene_name"], use_container_width=True)
-                                            else:
-                                                st.caption(parse_scene(sc)["scene_name"])
-                                    if len(members) > 5:
-                                        st.caption(f"... and {len(members) - 5} more")
+    # ------------------------------------------------------------------
+    # SUB-TAB B: EXPORT DATASET
+    # ------------------------------------------------------------------
+    with sa_tabs[1]:
+        section_header("Export Reviewed Dataset", level="h3", top_margin="0rem")
+        st.markdown(
+            "Export all **KEEP**-reviewed scenes that have been assigned a split into the final folder structure. "
+            "Source images come from the **256x256 interpolated output**. "
+            "Scenes still marked **Unassigned** are skipped — go to **Assign Splits** first."
+        )
 
-                            if st.button("Confirm All Detected Groups", type="primary", use_container_width=True, key="confirm_groups"):
-                                existing = active_set.get("groups", {})
-                                next_idx = len(existing) + 1
-                                for _, members in detected_groups.items():
-                                    gid = f"group_{next_idx:03d}"
-                                    existing[gid] = members
-                                    next_idx += 1
-                                active_set["groups"] = existing
-                                save_scene_set(set_name, active_set)
-                                st.session_state.pop("detected_groups", None)
-                                st.session_state.pop("detected_pairs", None)
-                                st.session_state["review_notice"] = {"msg": f"Confirmed {len(detected_groups)} group(s).", "type": "keep"}
-                                st.rerun()
+        keep_scenes = summary[summary["review_status"] == "KEEP"].copy()
+        total_keep = len(keep_scenes)
+        exportable = keep_scenes[keep_scenes["split"] != "Unassigned"]
+        total_exportable = len(exportable)
+        unassigned_keep = total_keep - total_exportable
 
-                        # ── Manual Group Management ──────────────────────────────
-                        with st.expander("Manual Group Management", expanded=False):
-                            st.markdown("Manually create a new group or add scenes to an existing group. Useful for forcing scenes to stay together if auto-detection missed them.")
-                            all_included = [sc for sc, d in scenes_data.items() if str(d.get("status", "")).lower() in ["include", "included"]]
-                            
-                            man_scenes = st.multiselect("Select Scenes", all_included, format_func=lambda x: f"{parse_scene(x)['scene_name']} ({x.split('_', 1)[0]})", key="man_grp_sc")
-                            grp_options = ["Create New Group"] + list(groups.keys())
-                            man_tgt = st.selectbox("Target Group", grp_options, key="man_grp_tgt")
-                            
-                            if st.button("Apply Manual Grouping", type="primary", disabled=not man_scenes):
-                                # Remove from existing groups first to prevent duplicates
-                                for sc in man_scenes:
-                                    for g, m in list(groups.items()):
-                                        if sc in m:
-                                            m.remove(sc)
-                                            if not m: del active_set["groups"][g]
-                                            
-                                if man_tgt == "Create New Group":
-                                    next_idx = 1
-                                    while f"group_{next_idx:03d}" in active_set.get("groups", {}):
-                                        next_idx += 1
-                                    gid = f"group_{next_idx:03d}"
-                                    active_set.setdefault("groups", {})[gid] = man_scenes
-                                else:
-                                    active_set["groups"][man_tgt].extend(man_scenes)
-                                    # Deduplicate
-                                    active_set["groups"][man_tgt] = list(set(active_set["groups"][man_tgt]))
-                                
-                                save_scene_set(set_name, active_set)
-                                st.session_state["review_notice"] = {"msg": f"Manually updated {man_tgt if man_tgt != 'Create New Group' else gid}.", "type": "keep"}
-                                st.rerun()
+        if total_keep == 0:
+            st.warning("No scenes have been marked as KEEP yet. Go to Scene Inspector to review scenes.")
+        elif total_exportable == 0:
+            st.warning(
+                f"{total_keep} KEEP scene(s) found, but none have an assigned split. "
+                "Go to the **Assign Splits** tab first."
+            )
+        else:
+            split_method_summary = exportable.groupby(["split", "method"]).size().reset_index(name="Scenes")
+            split_method_summary.columns = ["Split", "Method", "Count"]
+            unique_splits = sorted(exportable["split"].unique())
 
-                        # ── Show Confirmed Groups ───────────────────────────
-                        if groups:
-                            section_header("Confirmed Groups", level="h4")
-                            for gid, members in groups.items():
-                                with st.expander(f"{gid}: {len(members)} scenes"):
-                                    num_cols = 8
-                                    for i in range(0, len(members), num_cols):
-                                        cols = st.columns(num_cols)
-                                        for j, sc in enumerate(members[i:i+num_cols]):
-                                            with cols[j]:
-                                                img_path = resolve_scene_dir(DATASET_TARGET, sc) / "ois_sharp.jpg"
-                                                sc_split = scenes_data.get(sc, {}).get("split", "Unassigned")
-                                                split_short = sc_split[:3].upper() if sc_split != "Unassigned" else "---"
-                                                sc_method = parse_scene(sc).get("method", "Unknown")
-                                                m_short = sc_method[:3].upper() if sc_method != "Unknown" else "---"
-                                                label = f"{parse_scene(sc)['scene_name']} [{m_short} | {split_short}]"
-                                                if img_path.exists():
-                                                    st.image(str(img_path), caption=label, use_container_width=True)
-                                                else:
-                                                    st.caption(label)
-                                        
-                                    rc1, rc2, rc3 = st.columns([2, 2, 1])
-                                    with rc1:
-                                        all_included = [s for s, d in scenes_data.items() if str(d.get("status", "")).lower() in ["include", "included"] and s not in members]
-                                        to_add = st.multiselect("Add scenes", options=all_included, format_func=lambda x: f"{parse_scene(x)['scene_name']} ({x.split('_', 1)[0]})", key=f"add_sc_{gid}")
-                                        if st.button("Add Selected", key=f"btn_add_sc_{gid}", disabled=not to_add):
-                                            active_set["groups"][gid].extend(to_add)
-                                            active_set["groups"][gid] = list(set(active_set["groups"][gid]))
-                                            # Also remove these scenes from any other group they might be in
-                                            for g, m in list(active_set["groups"].items()):
-                                                if g == gid: continue
-                                                for a in to_add:
-                                                    if a in m: m.remove(a)
-                                                if not m: del active_set["groups"][g]
-                                            save_scene_set(set_name, active_set)
-                                            st.session_state["review_notice"] = {"msg": f"Added {len(to_add)} scene(s) to {gid}.", "type": "keep"}
-                                            st.rerun()
-                                    with rc2:
-                                        to_remove = st.multiselect("Remove scenes", options=members, format_func=lambda x: parse_scene(x)['scene_name'], key=f"rm_sc_{gid}")
-                                        if st.button("Remove Selected", key=f"btn_rm_sc_{gid}", disabled=not to_remove):
-                                            new_members = [m for m in members if m not in to_remove]
-                                            if new_members:
-                                                active_set["groups"][gid] = new_members
-                                            else:
-                                                del active_set["groups"][gid]
-                                            save_scene_set(set_name, active_set)
-                                            st.session_state["review_notice"] = {"msg": f"Removed {len(to_remove)} scene(s) from {gid}.", "type": "info"}
-                                            st.rerun()
-                                    with rc3:
-                                        st.markdown("<div style='margin-top:1.8rem;'></div>", unsafe_allow_html=True)
-                                        if st.button("Delete Group", key=f"rm_grp_{gid}", type="secondary"):
-                                            del active_set["groups"][gid]
-                                            save_scene_set(set_name, active_set)
-                                            st.session_state["review_notice"] = {"msg": f"Removed {gid}.", "type": "info"}
-                                            st.rerun()
-
-                            violations = validate_split_groups(scenes_data, groups)
-                            if violations:
-                                st.error(f"[Warning] {len(violations)} group(s) have members in different splits!")
-                                for v in violations:
-                                    st.warning(f"**{v['group']}**: split across {', '.join(v['splits'])}")
-                            else:
-                                st.success("[OK] All groups are intact — no cross-split leaks.")
-                        elif not detected_groups:
-                            st.info("No groups defined yet. Click **Scan for Similar Scenes** to auto-detect.")
-
-                    # ── Set management footer (shared, outside internal tabs) ────────
-
-        # ------------------------------------------------------------------
-        # SUB-TAB B: EXPORT DATASET
-        # ------------------------------------------------------------------
-        with sa_tabs[1]:
-            section_header("Export Dataset", level="h3", top_margin="0rem")
+            banner_parts = []
+            for sp in unique_splits:
+                cnt = exportable[exportable["split"] == sp].shape[0]
+                color = {"Training": "#3b82f6", "Validation": "#8b5cf6", "Testing": "#f59e0b"}.get(
+                    sp, "var(--textColor)"
+                )
+                banner_parts.append(
+                    f'<div><span style="font-size:1.5rem;font-weight:800;color:{color};">{cnt}</span>'
+                    f' <span style="opacity:0.6;font-size:0.8rem;text-transform:uppercase;">{sp}</span></div>'
+                )
+            if unassigned_keep > 0:
+                banner_parts.append(
+                    f'<div><span style="font-size:1.5rem;font-weight:800;color:#ef4444;">{unassigned_keep}</span>'
+                    f' <span style="opacity:0.6;font-size:0.8rem;text-transform:uppercase;">'
+                    f'Skipped (Unassigned)</span></div>'
+                )
             st.markdown(
-                "Export a **scene set** into the final folder structure for model training. "
-                "Each export creates a versioned dataset folder under `workspace/data/final_dataset/`."
+                f'<div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1.2rem;'
+                f'padding:1rem 1.4rem;background:var(--secondaryBackgroundColor);'
+                f'border-radius:10px;border:1px solid rgba(128,128,128,0.15);">'
+                + "".join(banner_parts) + "</div>",
+                unsafe_allow_html=True,
             )
 
-            available_sets = list_scene_sets()
-            if not available_sets:
-                st.info("No scene sets found. Create one in the **Scene Set Builder** tab first.")
-            else:
-                exp_cols_top = st.columns([2, 2, 2])
-                with exp_cols_top[0]:
-                    export_set_name = st.selectbox("Scene Set", available_sets, key="export_set_select")
-                with exp_cols_top[1]:
-                    existing_ds = list_final_datasets()
-                    next_num = len(existing_ds) + 1
-                    default_ds_name = f"dataset_{next_num}"
-                    dataset_name = st.text_input("Dataset folder name", value=default_ds_name, key="export_ds_name")
-                with exp_cols_top[2]:
-                    st.markdown("<div style='margin-top:1.6rem;'></div>", unsafe_allow_html=True)
-
-                # Load and preview the set
-                export_set = load_scene_set(export_set_name)
-                if export_set is None:
-                    st.error("Could not load the selected scene set.")
-                else:
-                    # Cross-reference with global review status: only keep scenes globally approved
-                    global_keep_scenes = set(summary[summary["review_status"] == "KEEP"]["scene"])
-                    export_set["scenes"] = {
-                        k: v for k, v in export_set["scenes"].items() 
-                        if k in global_keep_scenes
-                    }
-
-                    inc_scenes = {k: v for k, v in export_set["scenes"].items() if str(v.get("status", "")).lower() in ["include", "included"]}
-                    assigned = {k: v for k, v in inc_scenes.items() if v.get("split") in SPLIT_EXPORT_MAP}
-                    unassigned_inc = len(inc_scenes) - len(assigned)
-
-                    # Stats banner
-                    split_counts = {}
-                    for v in assigned.values():
-                        sp = v["split"]
-                        split_counts[sp] = split_counts.get(sp, 0) + 1
-
-                    banner_parts = []
-                    for sp in ["Training", "Validation", "Testing"]:
-                        cnt = split_counts.get(sp, 0)
-                        if cnt > 0:
-                            color = {"Training": "#3b82f6", "Validation": "#8b5cf6", "Testing": "#f59e0b"}.get(sp, "var(--textColor)")
-                            banner_parts.append(
-                                f'<div><span style="font-size:1.4rem;font-weight:800;color:{color};">{cnt}</span>'
-                                f' <span style="opacity:0.6;font-size:0.75rem;text-transform:uppercase;">{sp}</span></div>'
-                            )
-                    if unassigned_inc > 0:
-                        banner_parts.append(
-                            f'<div><span style="font-size:1.4rem;font-weight:800;color:#ef4444;">{unassigned_inc}</span>'
-                            f' <span style="opacity:0.6;font-size:0.75rem;text-transform:uppercase;">Unassigned (skipped)</span></div>'
-                        )
-
-                    st.markdown(
-                        f'<div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1.5rem;'
-                        f'padding:1rem 1.4rem;background:var(--secondaryBackgroundColor);'
-                        f'border-radius:10px;border:1px solid rgba(128,128,128,0.15);">'
-                        f'<div><span style="font-size:1.4rem;font-weight:800;color:#22c55e;">{len(assigned)}</span>'
-                        f' <span style="opacity:0.6;font-size:0.75rem;text-transform:uppercase;">Exportable</span></div>'
-                        + "".join(banner_parts) + '</div>',
-                        unsafe_allow_html=True,
+            section_header("Breakdown by Split", level="h4")
+            export_split_tabs = st.tabs(unique_splits)
+            for i, split_name in enumerate(unique_splits):
+                with export_split_tabs[i]:
+                    split_folder = SPLIT_EXPORT_MAP.get(split_name, split_name.lower())
+                    st.caption(
+                        f"**Target Paths:** `dataset_ois/{split_folder}/` & `dataset_nonois/{split_folder}/`"
                     )
+                    sp_data = split_method_summary[split_method_summary["Split"] == split_name]
+                    c1, c2 = st.columns([1, 2])
+                    c1.metric("Total Scene Pairs", sp_data["Count"].sum())
+                    c2.dataframe(sp_data[["Method", "Count"]], use_container_width=True, hide_index=True)
 
-                    if assigned:
-                        # Breakdown by Method
-                        method_counts = {}
-                        for sc in assigned.keys():
-                            m = parse_scene(sc)["method"]
-                            method_counts[m] = method_counts.get(m, 0) + 1
-                        
-                        st.markdown("<div style='font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; opacity: 0.6; text-transform: uppercase;'>Dataset Composition by Method</div>", unsafe_allow_html=True)
-                        
-                        method_cards = []
-                        for m, cnt in sorted(method_counts.items()):
-                            method_cards.append(
-                                f'<div class="scorecard-card">'
-                                f'<div class="scorecard-title" style="margin-bottom: 0.2rem;">{m}</div>'
-                                f'<div class="scorecard-value" style="font-size: 1.6rem;">{cnt} <span style="font-size: 0.8rem; font-weight: 600; opacity: 0.5; text-transform: uppercase;">Scenes</span></div>'
-                                f'</div>'
+            with st.expander(f"Preview export filenames ({total_exportable} scenes)", expanded=False):
+                st.markdown(
+                    "<div style='display:flex; justify-content:space-between; border-bottom:1px solid rgba(128,128,128,0.2); "
+                    "padding-bottom:0.5rem; margin-bottom:0.5rem; font-weight:600; font-size:0.85rem; opacity:0.6; "
+                    "text-transform:uppercase;'> "
+                    "<span style='flex:1;'>Export Filename</span> "
+                    "<span style='flex:2;'>Original Scene</span> "
+                    "<span style='flex:1;'>Method</span> "
+                    "<span style='flex:1;'>Split</span> "
+                    "<span style='flex:1; text-align:right;'>Action</span> "
+                    "</div>", unsafe_allow_html=True
+                )
+                
+                for split_label in sorted(exportable["split"].unique()):
+                    split_key = SPLIT_EXPORT_MAP.get(split_label, split_label.lower())
+                    split_scenes_sorted = exportable[exportable["split"] == split_label].sort_values(
+                        "scene_number"
+                    )
+                    for idx, (_, row) in enumerate(split_scenes_sorted.iterrows(), start=1):
+                        cols = st.columns([1, 2, 1, 1, 1], vertical_alignment="center")
+                        cols[0].write(f"{idx:03d}.jpg")
+                        cols[1].write(row["scene_name"])
+                        cols[2].write(row["method"])
+                        cols[3].write(split_key)
+                        with cols[4]:
+                            if st.button("Clear", key=f"exp_preview_clear_{row['scene']}", use_container_width=True):
+                                save_assignment(row["scene"], "split", split_label, "Unassigned", reviewer_name)
+                                load_all_logs.clear()
+                                st.rerun()
+
+            section_header("Output Folder Structure", level="h4")
+            st.code(
+                "dataset_ois/\n"
+                "  train/\n"
+                "    input/   <- ois_blur.jpg  (001.jpg, 002.jpg, ...)\n"
+                "    target/  <- ois_sharp.jpg (001.jpg, 002.jpg, ...)\n"
+                "  val/ ... test/\n"
+                "\n"
+                "dataset_nonois/\n"
+                "  train/\n"
+                "    input/   <- nonois_blur.jpg\n"
+                "    target/  <- nonois_sharp.jpg\n"
+                "  val/ ... test/",
+                language="text",
+            )
+
+
+            export_path = EXPORT_ROOT
+            st.caption(f"Export location: `{export_path.resolve()}`")
+
+            ois_exists = (export_path / "dataset_ois").exists()
+            nonois_exists = (export_path / "dataset_nonois").exists()
+            if ois_exists or nonois_exists:
+                st.warning(
+                    "A previous export already exists. Running export again will overwrite those files."
+                )
+
+            st.write("")
+            exp_cols = st.columns([1, 2])
+            with exp_cols[0]:
+                if st.button(
+                    "Export Dataset",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=total_exportable == 0,
+                ):
+                    with st.spinner("Exporting dataset..."):
+                        progress = st.progress(0, text="Starting export...")
+                        try:
+                            manifest_df = export_dataset(exportable, DATASET_256, export_path)
+                            progress.progress(100, text="Export complete!")
+                            st.session_state["last_export_manifest"] = manifest_df
+                            st.session_state["last_export_time"] = datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
                             )
-                        
-                        st.markdown(
-                            f'<div class="metric-grid-4" style="margin-bottom: 1.5rem;">{"".join(method_cards)}</div>',
-                            unsafe_allow_html=True
-                        )
-
-                    if not assigned:
-                        st.warning("No included scenes have a split assigned. Go to **Scene Set Builder** and assign splits.")
-                    else:
-                        # Output structure preview
-                        section_header("Output Folder Structure", level="h4")
-                        ds_n = html.escape(dataset_name.strip() or default_ds_name)
-                        st.code(
-                            f"""final_dataset/{ds_n}/
-  ois/
-    train/
-      input/   <- ois_blur.jpg  (001.jpg, 002.jpg, ...)
-      target/  <- ois_sharp.jpg (001.jpg, 002.jpg, ...)
-    val/  ...  test/
-  nonois/
-    train/
-      input/   <- nonois_blur.jpg
-      target/  <- nonois_sharp.jpg
-    val/  ...  test/""",
-                            language="text",
-                        )
-                        st.caption(f"Export location: `{(FINAL_DATASET_ROOT / (dataset_name.strip() or default_ds_name)).resolve()}`")
-
-                        # Existing datasets
-                        if existing_ds:
-                            section_header("Existing Datasets", level="h4")
-                            for ds in existing_ds:
-                                ds_path = FINAL_DATASET_ROOT / ds
-                                manifest_path = ds_path / "manifest.csv"
-                                file_count = sum(1 for _ in ds_path.rglob("*.jpg"))
-                                detail = f"{file_count} images"
-                                if manifest_path.exists():
-                                    try:
-                                        mdf = pd.read_csv(manifest_path)
-                                        detail = f"{len(mdf)} entries, {file_count} images"
-                                    except Exception:
-                                        pass
-                                ds_cols = st.columns([3, 2, 1])
-                                ds_cols[0].markdown(f"**{ds}**")
-                                ds_cols[1].caption(detail)
-                                with ds_cols[2]:
-                                    if st.button("Delete", key=f"del_ds_{ds}", use_container_width=True):
-                                        shutil.rmtree(str(ds_path), ignore_errors=True)
-                                        st.session_state["review_notice"] = {"msg": f"Deleted dataset '{ds}'.", "type": "reject"}
-                                        st.rerun()
-
-                        # Check for overwrite
-                        final_name = dataset_name.strip() or default_ds_name
-                        if (FINAL_DATASET_ROOT / final_name).exists():
-                            st.warning(f"A dataset named **{final_name}** already exists. Exporting will overwrite it.")
-
-                        st.write("")
-                        if st.button("Export Dataset", use_container_width=True, type="primary"):
-                            with st.spinner("Exporting dataset..."):
-                                try:
-                                    manifest_df = export_dataset_v2(export_set, DATASET_TARGET, final_name)
-                                    if manifest_df.empty:
-                                        st.warning("No files were exported. Check that scenes have assigned splits.")
-                                    else:
-                                        st.success(
-                                            f"Exported {len(manifest_df)} files to "
-                                            f"`final_dataset/{final_name}/` successfully!"
-                                        )
-                                except Exception as e:
-                                    st.error(f"Export failed: {e}")
+                            st.success(
+                                f"Exported {total_exportable} scenes ({len(manifest_df)} files) "
+                                f"successfully! Log saved to logs/dataset_export_log.csv"
+                            )
+                        except Exception as e:
+                            st.error(f"Export failed: {e}")
 
 
 # ======================================================================================
@@ -3690,7 +2628,7 @@ with main_tabs[2]:
                 counts = group["label"].str.upper().value_counts()
                 stats_data.append(
                     {
-                        "Reviewer": "User: " + str(rev),
+                        "Reviewer": "👤 " + str(rev),
                         "Total Scenes": len(group),
                         "KEEP": counts.get("KEEP", 0),
                         "REJECT": counts.get("REJECT", 0),
@@ -3810,25 +2748,25 @@ with main_tabs[2]:
             "the underlying pipeline logs are never modified."
         )
 
-        overrides_df = load_overrides()
-        split_overrides = pd.DataFrame()
-        if not overrides_df.empty:
-            overrides_df_sorted = overrides_df.sort_values("timestamp", ascending=False)
-            split_overrides = overrides_df_sorted[overrides_df_sorted["override_type"] == "split"]
-
-        if split_overrides.empty:
+        assignments_df = load_assignments()
+        split_assignments = pd.DataFrame()
+        if not assignments_df.empty:
+            assignments_df_sorted = assignments_df.sort_values("timestamp", ascending=False)
+            split_assignments = assignments_df_sorted[assignments_df_sorted["assignment_type"] == "split"]
+        
+        if split_assignments.empty:
             st.info("No split assignments have been saved yet. Go to **Split Assignment & Export** to assign scenes.")
         else:
-            st.dataframe(split_overrides, use_container_width=True, hide_index=True)
+            st.dataframe(split_assignments, use_container_width=True, hide_index=True)
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Reset All Split Assignments", type="secondary"):
-                df = load_overrides()
-                df = df[df["override_type"] != "split"]
+                df = load_assignments()
+                df = df[df["assignment_type"] != "split"]
                 if df.empty:
-                    if OVERRIDES_CSV.exists():
-                        OVERRIDES_CSV.unlink()
+                    if SPLIT_ASSIGNMENTS_CSV.exists():
+                        SPLIT_ASSIGNMENTS_CSV.unlink()
                 else:
-                    df.to_csv(OVERRIDES_CSV, index=False)
+                    df.to_csv(SPLIT_ASSIGNMENTS_CSV, index=False)
                 load_all_logs.clear()
                 st.success("All split assignments have been reset. Scenes are now Unassigned.")
                 st.rerun()
