@@ -19,7 +19,7 @@ st.set_page_config(page_title="Scene Dashboard", layout="wide")
 
 ROOT = Path(__file__).resolve().parent.parent.parent / "workspace"
 
-DATASET_TARGET = ROOT / "data" / "dataset_1080" / "gt_ois"
+DATASET_TARGET = ROOT / "data" / "dataset_512" / "gt_ois"
 ALIGNED_COLOR = ROOT / "data" / "aligned" / "gt_ois" / "color"
 DECODED_FRAMES = ROOT / "data" / "decoded_frames"
 
@@ -1374,10 +1374,10 @@ def tag_html(text, tone):
 
 def render_scene_header(scene_row, filtered_count, filtered_index, latest_review=None):
     scene = scene_row["scene"]
-    badges = [
-        tag_html(scene_row["split"], "info"),
-        tag_html(scene_row["method"], "muted"),
-    ]
+    badges = []
+    if scene_row["split"] != "Unassigned":
+        badges.append(tag_html(scene_row["split"], "info"))
+    badges.append(tag_html(scene_row["method"], "muted"))
 
     # Prepend prominent review status if it exists
     if latest_review == "KEEP":
@@ -1395,8 +1395,6 @@ def render_scene_header(scene_row, filtered_count, filtered_index, latest_review
         badges.append(tag_html("Low SSIM", "warn"))
     if above(scene_row.get("failed_count"), 0):
         badges.append(tag_html("Failed Checks", "bad"))
-    if as_bool(scene_row.get("nonois_used_fallback")):
-        badges.append(tag_html("Fallback Used", "warn"))
 
     st.markdown(
         (
@@ -1837,10 +1835,8 @@ st.markdown(
 
 # Setup/User Settings moved up
 
-split_options = sorted(summary["split"].dropna().unique())
 method_options = ["Sliding", "Vibration", "Handshake"]
 st.sidebar.header("Filters")
-selected_splits = st.sidebar.multiselect("Split", split_options, default=split_options)
 selected_methods = st.sidebar.multiselect("Method", method_options, default=method_options)
 scene_search = st.sidebar.text_input("Find scene", placeholder="scene_045 or vibration")
 sort_mode = st.sidebar.selectbox(
@@ -1967,7 +1963,7 @@ This is not a pass/fail — it is a **sorting tool**. Use "Sort by: Worst qualit
 # ---- Apply All Filters ----
 filtered = summary.copy()
 filtered = filtered[
-    filtered["split"].isin(selected_splits) & filtered["method"].isin(selected_methods)
+    filtered["method"].isin(selected_methods)
 ]
 filtered = filtered[
     filtered["my_review_status"].isin(selected_my_reviews) &
@@ -2010,7 +2006,7 @@ if filtered.empty:
     st.stop()
 
 scene_labels = {
-    row["scene"]: f"{row['scene_name']} | {row['split']} | {row['method']}"
+    row["scene"]: (f"{row['scene_name']} | {row['method']}" if row["split"] == "Unassigned" else f"{row['scene_name']} | {row['split']} | {row['method']}")
     for _, row in filtered.iterrows()
 }
 
@@ -2304,22 +2300,12 @@ with main_tabs[0]:
         render_asset_metrics(asset_status)
         
         capture_num = extract_capture_number(capture)
-        fallback_used = bool_label(scene_row.get("nonois_used_fallback"))
-        linear_scene = bool_label(scene_row.get("is_linear_scene"))
 
         info_html = (
             f'<div class="metric-grid-4">'
             f'<div class="scorecard-card">'
             f'<div class="scorecard-title">Capture #</div>'
             f'<div class="scorecard-value" style="font-size: 1.4rem;">{capture_num}</div>'
-            f'</div>'
-            f'<div class="scorecard-card">'
-            f'<div class="scorecard-title">Fallback Used</div>'
-            f'<div class="scorecard-value" style="font-size: 1.4rem;">{fallback_used}</div>'
-            f'</div>'
-            f'<div class="scorecard-card">'
-            f'<div class="scorecard-title">Linear Scene</div>'
-            f'<div class="scorecard-value" style="font-size: 1.4rem;">{linear_scene}</div>'
             f'</div>'
             f'</div>'
         )
@@ -2370,8 +2356,6 @@ with main_tabs[0]:
                 summary_rows.append(
                     {
                         "Capture": extract_capture_number(cap),
-                        "Fallback": bool_label(sel.get("nonois_used_fallback")) if sel is not None else "-",
-                        "Linear": bool_label(sel.get("is_linear_scene")) if sel is not None else "-",
                         "Ready": "Yes" if ois is not None and nonois is not None else "Partial",
                         "OIS Sharp Frame": frame_value(sel, "ois_sharp") if sel is not None else "",
                         "OIS Drop (Actual)": frame_value(sel, "ois_drop_frame_actual") if sel is not None else "",
@@ -2399,10 +2383,8 @@ with main_tabs[0]:
                     ois = load_laplacian(cap, "ois")
                     nonois = load_laplacian(cap, "nonois")
 
-                    cols = st.columns(3)
-                    cols[0].metric("Fallback Used", bool_label(sel.get("nonois_used_fallback")) if sel is not None else "-")
-                    cols[1].metric("Linear Scene", bool_label(sel.get("is_linear_scene")) if sel is not None else "-")
-                    cols[2].metric("Selection Ready", "Yes" if ois is not None and nonois is not None else "Partial")
+                    cols = st.columns(1)
+                    cols[0].metric("Selection Ready", "Yes" if ois is not None and nonois is not None else "Partial")
 
                     frame_tabs = st.tabs(["OIS Frames", "Non-OIS Frames"])
                     with frame_tabs[0]:

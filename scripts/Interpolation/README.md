@@ -7,11 +7,11 @@ The Interpolation script normalizes the spatial resolution of all aligned image 
 This script directly implements the "Interpolation (Downsampling)" stage of the methodology.
 * It applies inward center cropping to remove invalid border regions introduced during Geometric Alignment.
 * It applies **Bicubic interpolation** to standardize images.
-* The default size is **1080 × 1080 pixels** (configurable).
+* The default size is **512 × 512 pixels** (configurable).
 * As noted in the thesis, Bicubic interpolation preserves edge structures more effectively than Nearest Neighbor or Bilinear methods, maintaining structural consistency for fair evaluation.
 
 ## Outputs
-* The final resized images are output to `workspace/data/dataset_<size>/`.
+* The final resized images are output to `workspace/data/dataset_<size>/gt_ois/`.
 
 ## Setup & Usage
 

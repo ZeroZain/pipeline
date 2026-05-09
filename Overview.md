@@ -38,7 +38,7 @@ The pipeline strictly follows the sequential stages defined in the thesis:
         -> Handled by Alignment pipeline (chromatic normalization)
         
 7. Interpolation (Downsampling)
-        -> Handled by Interpolation (Bicubic resizing to 1080x1080)
+        -> Handled by Interpolation (Bicubic resizing to 512x512)
         
 8. Data Cleaning & Multi-Stage Validation
         -> Handled by Dashboard (Quality scoring, split assignment, export)
@@ -48,27 +48,42 @@ The pipeline spans two machines. On the **capture device**, `CaptureSync` organi
 
 ---
 
+# Installation & Requirements
+
+To run the pipeline, the following Python libraries must be installed. It is recommended to use a virtual environment:
+
+```bash
+pip install streamlit opencv-python pandas numpy rawpy scikit-image scipy matplotlib
+```
+
+---
+
 # Script Details & Thesis Mapping
 
 ### 1. CaptureSync (Pre-Pipeline Organization)
 CaptureSync is the entry point running on the capture device. It organizes raw video frame folders from two source devices (OIS and non-OIS) into a structured dataset on Google Drive.
 * **Role:** Ensures data is paired temporally (within ±2 seconds tolerance) and classified by motion method (HandShake, Sliding, Vibration). 
+* **How to Run:** `python scripts/CaptureSync/capture_sync.py`
 
 ### 2. Watcher (Frame Extraction)
 * **Thesis Stage:** Frame Extraction from OIS and Non-OIS Videos
 * **Role:** Monitors Google Drive, downloads captures, extracts ZIP archives, and removes all non-DNG files to produce the native RAW decoded frame collection. It preserves the exact frame rate and continuous temporal characteristics.
+* **How to Run:** `python scripts/Watcher/watcher.py`
 
 ### 3. Laplacian (Candidate & Reference Selection)
 * **Thesis Stage:** Sharp and Blur Candidate Selection & Reference Frame Selection
 * **Role:** Evaluates objective sharpness across extracted frames using the Variance of Laplacian to ensure consistent and repeatable identification of high-frequency content. It then selects a single stable sharp reference frame and a corresponding motion-blurred frame for each scene, ensuring pairs are temporally adjacent before applying correction steps.
+* **How to Run:** `python scripts/Laplacian/a2lap.py`
 
 ### 4. Alignment (Geometric, Photometric, Color)
 * **Thesis Stage:** Geometric Alignment, Photometric Alignment, Color Alignment
 * **Role:** A three-stage correction script. It first compensates for spatial misalignment (translation, rotation). Next, it matches intensity statistics to reduce brightness mismatch. Finally, it normalizes color distributions to prevent chromatic inconsistencies from influencing restoration metrics.
+* **How to Run:** `python scripts/Alignment/align4.py`
 
 ### 5. Interpolation (Downsampling)
 * **Thesis Stage:** Interpolation (Downsampling)
-* **Role:** Applies inward center cropping to remove invalid borders and uses Bicubic interpolation to resize all images to exactly **1080 × 1080 pixels**. This standardizes image resolution across all paired samples.
+* **Role:** Applies inward center cropping to remove invalid borders and uses Bicubic interpolation to resize all images to exactly **512 × 512 pixels**. This standardizes image resolution across all paired samples.
+* **How to Run:** `python scripts/Interpolation/interpolate.py`
 
 ### 6. Dashboard (Data Cleaning & Validation)
 * **Thesis Stage:** Data Cleaning & Multi-Stage Validation
@@ -76,6 +91,7 @@ CaptureSync is the entry point running on the capture device. It organizes raw v
   * **Objective Metrics:** Flow ROI p90 (geometric check), Min SSIM, Delta E.
   * **Manual Spot Check:** Fallback for algorithmic failure, allowing researchers to re-select frames or flag broken scenes.
   * **Dataset Structuring & Pair Locking:** Assigns scenes to Training/Validation/Testing splits and exports the finalized structured folders.
+* **How to Run:** `streamlit run tools/dashboard/app.py`
 
 ---
 

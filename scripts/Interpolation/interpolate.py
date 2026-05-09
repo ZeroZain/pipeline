@@ -17,9 +17,9 @@ DEBUG_ROOT = os.path.join(WORKSPACE_ROOT, "debug")
 GT_SOURCE = "ois"
 
 INPUT_DIR = os.path.join(DATA_ROOT, "aligned", f"gt_{GT_SOURCE}", "color")
-OUTPUT_DIR = os.path.join(DATA_ROOT, "dataset_1080", f"gt_{GT_SOURCE}")
+OUTPUT_DIR = os.path.join(DATA_ROOT, "dataset_512", f"gt_{GT_SOURCE}")
 
-TARGET_SIZE = 1080
+TARGET_SIZE = 512
 
 LOG_DIR = LOG_ROOT
 LOG_FILE = os.path.join(LOG_ROOT, "interpolation_log.csv")
@@ -110,7 +110,7 @@ def save_debug_visual(scene, images_dict):
     cv2.imwrite(os.path.join(DEBUG_DIR, f"{slugify_path(scene)}.jpg"), vis)
 
 
-def run_pipeline(target_scene=None, target_size=1080):
+def run_pipeline(target_scene=None, target_size=512):
     # Dynamically set paths based on size
     current_output_dir = os.path.join(DATA_ROOT, f"dataset_{target_size}", f"gt_{GT_SOURCE}")
     os.makedirs(current_output_dir, exist_ok=True)
